@@ -198,6 +198,12 @@ type csvSink struct {
 	// LastCommitted measures each committed ledger's lag against it. Nil in
 	// every other run — cold, or unpaced hot — which records no pace_lag.
 	schedule *paceSchedule
+
+	// specs overrides the package-level fileSpecs for this run. The query
+	// drivers register their own schema because its labels depend on the
+	// swept concurrency list, which is only known at run time; when nil
+	// (ingest runs), the package-level schema applies.
+	specs []fileSpec
 }
 
 var (
@@ -304,6 +310,15 @@ func (s *csvSink) Discard(int, time.Duration) {}
 
 func (s *csvSink) Prune(int, time.Duration) {}
 
+// setFileSpecs fixes this run's report schema — the file emission order and
+// each file's top-to-bottom row order — overriding the package-level
+// fileSpecs.
+func (s *csvSink) setFileSpecs(specs []fileSpec) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.specs = specs
+}
+
 // observe appends one sample to the (file, row) series, creating it on first
 // use. Every recording method lands here. (funcorder pins it below the
 // exported methods it serves.)
@@ -317,6 +332,13 @@ func (s *csvSink) observe(fileName, rowName string, d time.Duration, items int) 
 		s.rows[k] = sr
 	}
 	sr.observe(d, items)
+}
+
+// observeDriver records a driver-level row outside the MetricSink /
+// observability.Metrics interfaces — timings only the query drivers' own
+// loops can see (corpus scans, index builds, per-cell walls).
+func (s *csvSink) observeDriver(name string, d time.Duration, items int) {
+	s.observe(fileDriver, name, d, items)
 }
 
 // lastCommittedSeq returns the highest ledger the hot loop reported committed.
@@ -437,9 +459,13 @@ func (s *csvSink) files() []file {
 		byFile[k.file][k.row] = sr
 	}
 
-	names := make([]string, len(fileSpecs))
-	rowOrders := make(map[string][]string, len(fileSpecs))
-	for i, spec := range fileSpecs {
+	specs := s.specs
+	if specs == nil {
+		specs = fileSpecs
+	}
+	names := make([]string, len(specs))
+	rowOrders := make(map[string][]string, len(specs))
+	for i, spec := range specs {
 		names[i] = spec.name
 		rowOrders[spec.name] = spec.rowOrder
 	}
