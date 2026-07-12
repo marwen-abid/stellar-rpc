@@ -1,0 +1,34 @@
+# Gated benchmark metrics for scripts/bench-ci/run.sh — one
+# "<csv path relative to a run root>,<row>,<column>" per line, read by
+# `stellar-rpc bench-compare`.
+#
+# Chosen to be CPU-bound and repeatable on shared runners. Deliberately
+# absent: the hot `commit` phase (fsync-bound — it measures the runner's
+# disk, not the change under test) and the driver's whole-run walls
+# (`run_wall`, `backfill_wall`) — like any fsync-bound row, they measure
+# the runner, not the change.
+
+# cold ingestion: per-stage totals over one full synthetic chunk
+ingest-cold/ledgers.csv,write,total_ns
+ingest-cold/ledgers.csv,finalize,total_ns
+ingest-cold/txhash.csv,finalize,total_ns
+ingest-cold/events.csv,term_index,total_ns
+ingest-cold/events.csv,write,total_ns
+ingest-cold/events.csv,finalize,total_ns
+ingest-cold/driver.csv,cold_extract,total_ns
+ingest-cold/driver.csv,chunk_total,total_ns
+
+# hot ingestion: CPU-bound phases only
+ingest-hot/hot.csv,extract,total_ns
+ingest-hot/hot.csv,apply,total_ns
+
+# query latencies: per-operation p50, per swept concurrency
+query-cold/ledgers.csv,total_c1,p50_ns
+query-cold/ledgers.csv,total_c4,p50_ns
+query-cold/txpage.csv,total_c1,p50_ns
+query-cold/txhash.csv,total_c1,p50_ns
+query-cold/events.csv,total_c1,p50_ns
+query-hot/ledgers.csv,total_c1,p50_ns
+query-hot/txpage.csv,total_c1,p50_ns
+query-hot/txhash.csv,total_c1,p50_ns
+query-hot/events.csv,total_c1,p50_ns
