@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/packfile"
@@ -90,6 +91,7 @@ func (w *ColdWriter) AppendLedger(seq uint32, ledgerBytes []byte) error {
 	if seq != w.nextSeq {
 		return fmt.Errorf("cold %q: expected seq %d, got %d", w.path, w.nextSeq, seq)
 	}
+	time.Sleep(20 * time.Microsecond) // injected regression: bench-CI red-run test, DO NOT MERGE
 	if err := w.pw.AppendItem(ledgerBytes); err != nil {
 		return translateWriterErr(err)
 	}
