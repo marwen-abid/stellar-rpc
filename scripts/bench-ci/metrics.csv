@@ -32,3 +32,5 @@ query-hot/ledgers.csv,total_c1,p50_ns
 query-hot/txpage.csv,total_c1,p50_ns
 query-hot/txhash.csv,total_c1,p50_ns
 query-hot/events.csv,total_c1,p50_ns
+
+# green-run trigger 2
