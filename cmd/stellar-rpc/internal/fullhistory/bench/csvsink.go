@@ -111,6 +111,12 @@ func (s *series) observe(d time.Duration, items int) {
 type csvSink struct {
 	mu   sync.Mutex
 	rows map[rowKey]*series // every signal is one sample on a (file, row) key
+	// rowOrders and fileOrder override the package-level report orders for
+	// this run. The query drivers register them because their labels depend
+	// on the swept concurrency list, which is only known at run time; when
+	// unset (ingest runs), the package-level orders apply.
+	rowOrders map[string][]string
+	fileOrder []string
 }
 
 // rowKey locates one CSV row: the file basename it lands in and its row label.
@@ -261,6 +267,25 @@ func (s *csvSink) logSummary(logger *supportlog.Entry) {
 	}
 }
 
+// setRowOrder fixes one CSV file's top-to-bottom row order for this run,
+// overriding the package-level default.
+func (s *csvSink) setRowOrder(fileName string, order []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rowOrders == nil {
+		s.rowOrders = make(map[string][]string)
+	}
+	s.rowOrders[fileName] = order
+}
+
+// setFileOrder fixes the order writeCSVs emits files in for this run,
+// overriding the package-level default.
+func (s *csvSink) setFileOrder(order []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fileOrder = order
+}
+
 // observe appends one sample to the (file, row) series, creating it on first
 // use.
 func (s *csvSink) observe(fileName, rowName string, d time.Duration, items int) {
@@ -319,11 +344,19 @@ func (s *csvSink) files() []file {
 		byFile[k.file][k.row] = sr
 	}
 
+	fileOrd := s.fileOrder
+	if fileOrd == nil {
+		fileOrd = fileOrder
+	}
 	var out []file
-	for _, name := range withUnknown(fileOrder, byFile) {
+	for _, name := range withUnknown(fileOrd, byFile) {
 		byRow := byFile[name]
 		var rows []row
-		for _, label := range withUnknown(rowOrderFor(name), byRow) {
+		rowOrd := s.rowOrders[name]
+		if rowOrd == nil {
+			rowOrd = rowOrderFor(name)
+		}
+		for _, label := range withUnknown(rowOrd, byRow) {
 			if sr := byRow[label]; sr != nil {
 				if r, ok := aggregate(label, sr); ok {
 					rows = append(rows, r)

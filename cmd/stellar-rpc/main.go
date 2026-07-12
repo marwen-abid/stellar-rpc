@@ -112,6 +112,7 @@ func main() {
 	rootCmd.AddCommand(genConfigFileCmd)
 	rootCmd.AddCommand(fullHistoryCmd)
 	rootCmd.AddCommand(bench.NewCommand())
+	rootCmd.AddCommand(bench.NewQueryCommand())
 
 	if err := cfg.AddFlags(rootCmd); err != nil {
 		fmt.Fprintf(os.Stderr, "could not parse config options: %v\n", err)

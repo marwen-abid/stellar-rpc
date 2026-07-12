@@ -1,6 +1,12 @@
 # Changelog
 
 
+## [Unreleased]
+
+### Added
+* Add `bench-query cold|hot` subcommand benchmarking the production full-history read paths — ledger range reads, transaction-page reads, transaction-hash lookups, and events queries (MPHF index probe + post-filter included) — with `--query-concurrency` sweeps and CSV percentile reports in the same schema as `bench-ingest` ([#856](https://github.com/stellar/stellar-rpc/issues/856)).
+
+
 ## [v26.0.0](https://github.com/stellar/stellar-rpc/compare/v25.1.1...v26.0.0)
 
 ### Breaking Changes
