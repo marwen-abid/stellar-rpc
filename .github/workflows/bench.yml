@@ -1,0 +1,97 @@
+# Advisory full-history benchmark lane (#775).
+#
+# Pull requests: build the PR base and the PR head, benchmark both against the
+# same deterministic synthetic dataset — interleaved on one runner, so machine
+# noise hits both sides equally — and fail the (advisory) job when
+# `bench-compare` finds a statistically significant slowdown in a gated
+# metric. scripts/bench-ci/run.sh owns the workload; scripts/bench-ci/
+# metrics.csv owns the gated-metric list.
+#
+# Nightly + manual runs benchmark the current build against itself (a
+# noise-floor self-check) and keep the CSVs as artifacts. Wall-time trend
+# tracking on pinned hardware with change-point detection is a follow-up —
+# hosted runners are only fit for the paired comparison above.
+#
+# The workflow name must stay outside the prefixes required_status_check.yml
+# gates on (Go*, Rust*, Stellar RPC*, Dependency sanity checker*): this lane
+# is advisory, not merge-blocking.
+name: Full History Benchmarks
+
+on:
+  pull_request:
+    paths:
+      - 'cmd/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Makefile'
+      - 'scripts/**'
+      - '.github/workflows/bench.yml'
+      - '.github/actions/**'
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the baseline build checks out the PR base commit.
+          fetch-depth: 0
+
+      - name: Setup the Go environment
+        uses: ./.github/actions/setup-go
+
+      - name: Update rust
+        run: rustup update
+
+      - uses: stellar/actions/rust-cache@main
+
+      - name: Build candidate binary
+        run: |
+          make build-libs
+          go build -o "$RUNNER_TEMP/stellar-rpc-candidate" ./cmd/stellar-rpc
+
+      - name: Build baseline binary
+        env:
+          BASELINE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: |
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$BASELINE_SHA" = "$HEAD_SHA" ]; then
+            # No PR base (manual/nightly run): self-compare, which measures
+            # the runner's noise floor with the same pipeline.
+            cp "$RUNNER_TEMP/stellar-rpc-candidate" "$RUNNER_TEMP/stellar-rpc-baseline"
+            exit 0
+          fi
+          git checkout --force "$BASELINE_SHA"
+          make build-libs
+          go build -o "$RUNNER_TEMP/stellar-rpc-baseline" ./cmd/stellar-rpc
+          git checkout --force "$HEAD_SHA"
+
+      - name: Run benchmarks and compare
+        env:
+          CANDIDATE_BIN: ${{ runner.temp }}/stellar-rpc-candidate
+          BASELINE_BIN: ${{ runner.temp }}/stellar-rpc-baseline
+          WORKDIR: ${{ runner.temp }}/bench
+        run: SUMMARY_FILE="$GITHUB_STEP_SUMMARY" ./scripts/bench-ci/run.sh
+
+      - name: Upload benchmark CSVs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-csvs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/bench/**/*.csv
+            ${{ runner.temp }}/bench/**/*.log
+          if-no-files-found: ignore
