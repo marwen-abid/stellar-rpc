@@ -19,13 +19,15 @@ import (
 
 // NewCommand returns the `bench-ingest` command tree: `cold`
 // benchmarks ingest.WriteColdChunk, `hot` benchmarks ingest.HotService — both
-// against the production ingest package, reporting per-stage percentile CSVs.
+// against the production ingest package, reporting per-stage percentile CSVs —
+// and `fixture` generates the deterministic synthetic source pack they can
+// run against.
 func NewCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bench-ingest",
 		Short: "Benchmark full-history ingestion against the production ingest path",
 	}
-	cmd.AddCommand(newColdCommand(), newHotCommand())
+	cmd.AddCommand(newColdCommand(), newHotCommand(), newFixtureCommand())
 	return cmd
 }
 
@@ -203,6 +205,45 @@ func newHotCommand() *cobra.Command {
 		"scratch root for the fresh hot RocksDB (required; the chunk's DB dir must not exist)")
 	fs.StringVar(&outDir, "out", "bench-out", "CSV output dir")
 	markRequired(cmd, "chunk", "hot-dir")
+	return cmd
+}
+
+func newFixtureCommand() *cobra.Command {
+	var (
+		packDir    string
+		chunkArg   uint32
+		numLedgers uint32
+		seed       uint64
+	)
+	cmd := &cobra.Command{
+		Use:   "fixture",
+		Short: "Generate the deterministic synthetic source pack the benchmarks run against",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmd.SilenceUsage = true
+			if numLedgers == 0 {
+				numLedgers = chunk.LedgersPerChunk
+			}
+			if numLedgers > chunk.LedgersPerChunk {
+				return fmt.Errorf("--num-ledgers %d exceeds the %d ledgers of a chunk", numLedgers, chunk.LedgersPerChunk)
+			}
+			_, _, logger := benchContext()
+			txLedgers, err := writeFixturePack(packDir, chunk.ID(chunkArg), numLedgers, seed)
+			if err != nil {
+				return err
+			}
+			logger.Infof("wrote fixture pack for chunk %d under %s: %d ledgers (%d with a tx+event)",
+				chunkArg, packDir, numLedgers, txLedgers)
+			return nil
+		},
+	}
+	fs := cmd.Flags()
+	fs.StringVar(&packDir, "pack-dir", "",
+		"ledgers tree root to write the pack under — what cold/hot --pack-dir then points at (required)")
+	fs.Uint32Var(&chunkArg, "chunk", 0, "chunk ID to generate (required)")
+	fs.Uint32Var(&numLedgers, "num-ledgers", 0, "ledgers to write from the chunk's first sequence (0 = whole chunk)")
+	fs.Uint64Var(&seed, "seed", 1, "determinism seed (same seed = same pack bytes)")
+	markRequired(cmd, "pack-dir", "chunk")
 	return cmd
 }
 
