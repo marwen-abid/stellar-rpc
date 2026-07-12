@@ -16,8 +16,9 @@ func TestNewCommand(t *testing.T) {
 	require.Equal(t, "bench-ingest", cmd.Use)
 
 	requiredBySubcommand := map[string][]string{
-		"cold": {"types", "chunk", "cold-out-dir"},
-		"hot":  {"chunk", "hot-dir"},
+		"cold":    {"types", "chunk", "cold-out-dir"},
+		"hot":     {"chunk", "hot-dir"},
+		"fixture": {"pack-dir", "chunk"},
 	}
 	subs := make(map[string]*cobra.Command, len(cmd.Commands()))
 	for _, sub := range cmd.Commands() {
@@ -32,5 +33,18 @@ func TestNewCommand(t *testing.T) {
 			require.Contains(t, f.Annotations, cobra.BashCompOneRequiredFlag,
 				"%s: flag --%s not marked required", name, fn)
 		}
+	}
+}
+
+// TestNewCompareCommand pins bench-compare's required flags, same as
+// TestNewCommand does for bench-ingest.
+func TestNewCompareCommand(t *testing.T) {
+	cmd := NewCompareCommand()
+	require.Equal(t, "bench-compare", cmd.Use)
+	for _, fn := range []string{"baseline-root", "candidate-root", "metrics-file"} {
+		f := cmd.Flags().Lookup(fn)
+		require.NotNil(t, f, "flag --%s missing", fn)
+		require.Contains(t, f.Annotations, cobra.BashCompOneRequiredFlag,
+			"flag --%s not marked required", fn)
 	}
 }

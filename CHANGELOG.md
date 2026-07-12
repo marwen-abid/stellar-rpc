@@ -5,6 +5,7 @@
 
 ### Added
 * Add `bench-query cold|hot` subcommand benchmarking the production full-history read paths — ledger range reads, transaction-page reads, transaction-hash lookups, and events queries (MPHF index probe + post-filter included) — with `--query-concurrency` sweeps and CSV percentile reports in the same schema as `bench-ingest` ([#856](https://github.com/stellar/stellar-rpc/issues/856)).
+* Add a `bench-ingest fixture` subcommand generating a deterministic synthetic benchmark dataset, a `bench-compare` subcommand judging repeated benchmark CSV runs of two builds with an exact permutation test, and an advisory "Full History Benchmarks" CI workflow (`scripts/bench-ci/run.sh`) that benchmarks every pull request's build against its base — interleaved on one runner over the fixture dataset — and flags statistically significant slowdowns ([#775](https://github.com/stellar/stellar-rpc/issues/775)).
 
 
 ## [v26.0.0](https://github.com/stellar/stellar-rpc/compare/v25.1.1...v26.0.0)

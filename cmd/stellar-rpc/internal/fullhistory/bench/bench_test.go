@@ -14,16 +14,10 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/fhtest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/ledger"
 )
-
-// eventEvery: every eventEvery-th ledger of a fixture chunk carries one
-// transaction with one contract event; the rest are zero-tx ledgers.
-const eventEvery = 100
 
 func testLogger() *supportlog.Entry {
 	l := supportlog.New()
@@ -33,33 +27,16 @@ func testLogger() *supportlog.Entry {
 
 // writeSourcePack materializes a source ledger pack for chunkID under
 // root/ledgers (the tree --pack-dir points at), containing numLedgers ledgers
-// from the chunk's first sequence: every eventEvery-th one carries a
-// transaction with one contract event, the rest are zero-tx. It returns the
-// ledgers tree root and the number of tx/event-bearing ledgers written.
+// from the chunk's first sequence — the `bench-ingest fixture` generator, so
+// every end-to-end test here exercises the same dataset CI benchmarks against.
+// It returns the ledgers tree root and the number of tx/event-bearing ledgers
+// written.
 func writeSourcePack(t *testing.T, root string, chunkID chunk.ID, numLedgers uint32) (string, int) {
 	t.Helper()
-	layout := geometry.NewLayout(root)
-	packPath := layout.LedgerPackPath(chunkID)
-	require.NoError(t, os.MkdirAll(filepath.Dir(packPath), 0o755))
-
-	w, err := ledger.NewColdWriter(packPath, chunkID.FirstLedger(), ledger.ColdWriterOptions{})
+	ledgersRoot := geometry.NewLayout(root).LedgersRoot()
+	txLedgers, err := writeFixturePack(ledgersRoot, chunkID, numLedgers, 1)
 	require.NoError(t, err)
-	defer func() { _ = w.Close() }()
-
-	txLedgers := 0
-	first := chunkID.FirstLedger()
-	for seq := first; seq < first+numLedgers; seq++ {
-		var raw []byte
-		if (seq-first)%eventEvery == 0 {
-			raw = fhtest.EventLCMBytes(t, seq)
-			txLedgers++
-		} else {
-			raw = fhtest.ZeroTxLCMBytes(t, seq)
-		}
-		require.NoError(t, w.AppendLedger(seq, raw))
-	}
-	require.NoError(t, w.Commit())
-	return layout.LedgersRoot(), txLedgers
+	return ledgersRoot, txLedgers
 }
 
 // readCSV parses one report file into rows keyed by stage name; each row maps
