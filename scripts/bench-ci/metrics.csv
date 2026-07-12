@@ -1,4 +1,4 @@
-# Gated benchmark metrics for scripts/bench-ci/run.sh — one
+# Gated benchmark metrics for scripts/bench-ci/run.sh: one
 # "<csv path relative to a run root>,<row>,<column>" per line, read by
 # `stellar-rpc bench-compare`.
 #
