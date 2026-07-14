@@ -19,7 +19,6 @@ import (
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/backfill"
-	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/config"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
@@ -44,7 +43,9 @@ type coldOptions struct {
 	// ColdRoot is the output root the cold artifacts land under, laid out by
 	// geometry.NewLayout. It is scratch: the run's catalog is a fresh temp-dir
 	// scratch (deleted afterwards), so re-runs re-plan from empty and
-	// overwrite freely.
+	// overwrite freely. But nothing sweeps other ranges' leftovers: a prior
+	// run's artifacts — notably the coverage-encoding txhash .idx files — can
+	// look valid to later tooling, so prefer a fresh dir.
 	ColdRoot string
 	// OutDir receives the CSV report.
 	OutDir string
@@ -142,31 +143,6 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)
 	return nil
-}
-
-// openScratchCatalog opens a fresh, run-scoped catalog in a temp dir, bound to
-// layout. Fresh-per-run is what makes every run a clean backfill from empty
-// (durable states would otherwise self-skip finished work on a re-run); the
-// release func closes the catalog and deletes the temp dir.
-func openScratchCatalog(layout geometry.Layout, logger *supportlog.Entry) (*catalog.Catalog, func(), error) {
-	dir, err := os.MkdirTemp("", "bench-ingest-catalog-")
-	if err != nil {
-		return nil, nil, fmt.Errorf("create scratch catalog dir: %w", err)
-	}
-	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
-	if err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, nil, err
-	}
-	cat, err := catalog.Open(filepath.Join(dir, "catalog"), layout, txLayout, logger)
-	if err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, nil, fmt.Errorf("open scratch catalog: %w", err)
-	}
-	return cat, func() {
-		_ = cat.Close()
-		_ = os.RemoveAll(dir)
-	}, nil
 }
 
 // logColdWall logs the run's total wall-clock and, for multi-chunk runs, the

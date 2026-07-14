@@ -1,10 +1,12 @@
 package bench
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -75,6 +77,45 @@ func TestCSVSinkExactOutput(t *testing.T) {
 		assert.Equal(t, content, string(got), name)
 	}
 	assert.NoFileExists(t, filepath.Join(outDir, "txhash.csv"))
+}
+
+// TestCSVSinkHotIngestTotal drives the ingest_total reconstruction directly:
+// two complete per-ledger HotPhase bursts (extract→ledgers→txhash→events→
+// commit→apply) plus one FAILED burst (extract, then a phase carrying an error,
+// no apply). Only PhaseApply — the terminal, success-only phase — emits an
+// ingest_total sample, so the failed burst contributes nothing; each complete
+// burst contributes one sample (items=1) whose duration is the sum of that
+// burst's phases.
+func TestCSVSinkHotIngestTotal(t *testing.T) {
+	sink := newCSVSink()
+
+	// burst plays one complete per-ledger phase burst, each phase 1ns longer
+	// than the last, so its six phases sum to base*6+21ns.
+	burst := func(base time.Duration) {
+		sink.HotPhase(hotchunk.PhaseExtract, base+1, 0, nil)
+		sink.HotPhase(hotchunk.PhaseLedgers, base+2, 1, nil)
+		sink.HotPhase(hotchunk.PhaseTxhash, base+3, 4, nil)
+		sink.HotPhase(hotchunk.PhaseEvents, base+4, 2, nil)
+		sink.HotPhase(hotchunk.PhaseCommit, base+5, 0, nil)
+		sink.HotPhase(hotchunk.PhaseApply, base+6, 0, nil)
+	}
+	burst(100) // 6*100 + 21 = 621
+	burst(200) // 6*200 + 21 = 1221
+
+	// A failed ledger: extract ran, then PhaseCommit failed — no apply, so no
+	// ingest_total sample.
+	sink.HotPhase(hotchunk.PhaseExtract, 10, 0, nil)
+	sink.HotPhase(hotchunk.PhaseCommit, 20, 0, errors.New("commit failed"))
+
+	outDir := t.TempDir()
+	_, err := sink.writeCSVs(outDir)
+	require.NoError(t, err)
+
+	driver := readCSV(t, filepath.Join(outDir, "driver.csv"))
+	require.Contains(t, driver, "ingest_total")
+	assert.EqualValues(t, 2, driver["ingest_total"]["n"])
+	assert.EqualValues(t, 2, driver["ingest_total"]["n_items"])
+	assert.EqualValues(t, 621+1221, driver["ingest_total"]["total_ns"])
 }
 
 // TestCSVSinkEmpty asserts a sink with no signals writes no files.

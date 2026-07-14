@@ -119,7 +119,6 @@ func newBenchCommand(
 	return cmd
 }
 
-//nolint:dupl // parallel flag surfaces: cold and hot share shape, not meaning
 func newColdCommand() *cobra.Command {
 	var (
 		src        sourceFlags
@@ -148,13 +147,13 @@ func newColdCommand() *cobra.Command {
 	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to backfill starting at --chunk")
 	fs.IntVar(&workers, "workers", 1, "backfill worker-pool size, shared by chunk freezes and index builds")
 	fs.StringVar(&coldOutDir, "cold-out-dir", "",
-		"output root for cold artifacts (required; scratch — re-runs overwrite)")
+		"output root for cold artifacts (required; use a fresh dir — same-range "+
+			"re-runs overwrite, but leftovers from other ranges are never swept)")
 	fs.StringVar(&outDir, "out", "bench-out", "CSV output dir")
 	markRequired(cmd, "chunk", "cold-out-dir")
 	return cmd
 }
 
-//nolint:dupl // parallel flag surfaces: cold and hot share shape, not meaning
 func newHotCommand() *cobra.Command {
 	var (
 		src        sourceFlags

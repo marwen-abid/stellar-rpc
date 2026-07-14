@@ -275,14 +275,19 @@ func TestRunHotFromPack(t *testing.T) {
 	assert.EqualValues(t, numLedgers, hot["commit"]["n"])
 	require.Contains(t, hot, "apply")
 
-	// The loop pulls the stream itself, so the only driver row is the whole
-	// run's wall-clock (the old per-ledger ingest_total/read_blocked rows were
-	// bench-loop artifacts and are gone).
+	// The loop pulls the stream itself, so run_wall is the only row the driver
+	// times directly; ingest_total is reconstructed inside the sink from each
+	// ledger's HotPhase burst — one sample per ledger (items=1), giving the
+	// per-ledger end-to-end latency the per-phase rows can't be summed into.
+	// Every sample includes the fsync'd commit, so none is sub-tick: n counts
+	// all numLedgers. (read_blocked was a bench-loop artifact and stays gone.)
 	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
 	require.Contains(t, driver, "run_wall")
 	assert.EqualValues(t, 1, driver["run_wall"]["n"])
 	assert.EqualValues(t, numLedgers, driver["run_wall"]["n_items"])
-	assert.NotContains(t, driver, "ingest_total")
+	require.Contains(t, driver, "ingest_total")
+	assert.EqualValues(t, numLedgers, driver["ingest_total"]["n"])
+	assert.EqualValues(t, numLedgers, driver["ingest_total"]["n_items"])
 	assert.NotContains(t, driver, "read_blocked")
 
 	// A second run against the same hot root succeeds from a fixed (empty)
@@ -290,8 +295,16 @@ func TestRunHotFromPack(t *testing.T) {
 	require.NoError(t, runHot(context.Background(), testLogger(), opts))
 }
 
-// TestRunHotIncompleteStream asserts the completion check: a source that ends
-// before the requested range is an error, not a silently short report.
+// TestRunHotIncompleteStream asserts an undersized source is a hard error, not
+// a silently short report. A pack holding 50 ledgers covers seqs [2, 51]; asking
+// for 60 makes runHot request [2, 61]. The pack stream requires the whole
+// requested range to fall within its coverage, so it refuses the overshoot up
+// front (stores.ErrOutOfRange, no ledgers streamed at all) and the loop surfaces
+// that wrapped as "ingestion stream: ...". So it is that stream-error path that
+// fires here, NOT runHot's own post-loop completion check (last-committed !=
+// requested last): the loop returns the error before ingesting anything, so the
+// completion check is never reached. Pin the exact refusal so an unrelated
+// failure (pack-open error, config mistake) can't masquerade as this assertion.
 func TestRunHotIncompleteStream(t *testing.T) {
 	const packed = 50
 	chunkID := chunk.ID(0)
@@ -305,5 +318,9 @@ func TestRunHotIncompleteStream(t *testing.T) {
 		HotRoot:    t.TempDir(),
 		OutDir:     filepath.Join(t.TempDir(), "csv"),
 	})
-	require.Error(t, err)
+	// Seqs are fixture-determined: 50 ledgers from chunk 0 → coverage [2, 51];
+	// packed+10 requested → [2, 61]. Both bounds are deterministic, so pinning
+	// them is exact rather than volatile.
+	require.ErrorContains(t, err, "ingestion stream: stores: out of range: "+
+		"requested [2, 61] outside store coverage [2, 51]")
 }

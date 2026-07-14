@@ -31,16 +31,20 @@ const (
 	fileDriver = "driver" // driver.csv: per-chunk aggregate rows
 )
 
-// Driver-report row labels. run_wall is observed by the hot bench driver
-// itself (observeDriver); backfill_wall and index_rebuild arrive through the
-// observability.Metrics signals the backfill scheduler emits; the rest arrive
+// Driver-report row labels. run_wall is recorded by the hot bench driver
+// itself via observe; backfill_wall and index_rebuild arrive through the
+// observability.Metrics signals the backfill scheduler emits; ingest_total is
+// reconstructed in HotPhase from each ledger's phase burst; the rest arrive
 // through the MetricSink cold signals.
 const (
 	driverBackfillWall = "backfill_wall" // cold only: RunBackfill's whole plan-and-execute wall (Metrics.Freeze)
 	driverIndexRebuild = "index_rebuild" // cold only: one txhash index build incl. eager sweep (Metrics.Rebuild)
 	driverChunkTotal   = "chunk_total"   // ColdChunkTotal: per-chunk ColdService lifetime
 	driverTotalSuffix  = "_total"        // ColdIngest per data type: "<type>_total"
-	driverRunWall      = "run_wall"      // hot only: whole-run wall-clock, seen by the driver
+	// hot only: per-ledger end-to-end ingest time, reconstructed as the sum of
+	// one ledger's HotPhase burst (per-phase percentiles can't be summed).
+	driverIngestTotal = "ingest_total"
+	driverRunWall     = "run_wall" // hot only: whole-run wall-clock, seen by the driver
 )
 
 // fileSpec is one CSV file of the report: its basename (without .csv) and the
@@ -59,7 +63,9 @@ type fileSpec struct {
 //   - driver.csv, the run-level aggregates: the cold scheduler's backfill wall
 //     and per-index-build rebuild rows (observability.Metrics), the engine's
 //     ColdChunkTotal, one "<type>_total" row per cold data type (ColdIngest),
-//     and the hot bench's driver-observed run wall-clock.
+//     the hot per-ledger end-to-end ingest_total (reconstructed from each
+//     ledger's phase burst in HotPhase), and the hot bench's driver-observed
+//     run wall-clock.
 //
 // A label recorded outside this vocabulary is still reported: withUnknown
 // appends it after the known rows (or files) rather than silently dropping it.
@@ -74,12 +80,13 @@ var fileSpecs = func() []fileSpec {
 		hotRows[p] = p.String()
 	}
 
-	driverRows := make([]string, 0, len(coldTypes)+4)
+	driverRows := make([]string, 0, len(coldTypes)+5)
 	driverRows = append(driverRows, driverBackfillWall, driverIndexRebuild, driverChunkTotal)
 	for _, dt := range coldTypes {
 		driverRows = append(driverRows, dt+driverTotalSuffix)
 	}
-	driverRows = append(driverRows, driverRunWall)
+	// ingest_total then run_wall keep the two hot rows grouped at the end.
+	driverRows = append(driverRows, driverIngestTotal, driverRunWall)
 
 	specs := make([]fileSpec, 0, len(coldTypes)+2)
 	for _, dt := range coldTypes {
@@ -117,12 +124,16 @@ type rowKey struct {
 // fileSpecs. n counts only non-zero-duration samples (an empty ledger's
 // zero-duration stage does not skew percentiles) and n_items sums each
 // included sample's natural item count. Rows with no included samples — and
-// files with no rows — are suppressed.
+// files with no rows — are suppressed. Most signals map one-to-one onto a
+// sample; HotPhase additionally reconstructs the per-ledger ingest_total row
+// from each ledger's phase burst (see HotPhase).
 //
 // Of the observability signals only the durations a bench run produces are
 // recorded (Freeze — the backfill wall — and Rebuild — one index build each);
 // LastCommitted is tracked as a gauge for the hot driver's completion check,
-// and the rest (lifecycle gauges/counters no bench run drives) are dropped.
+// and the rest carry no bench signal so they are dropped — Prune does fire
+// from each index build's eager sweep, but its wall is already inside Rebuild
+// and a fresh scratch run sweeps ~nothing; the others never fire.
 //
 // All methods are safe for concurrent use (one mutex), as the MetricSink
 // contract requires: the backfill scheduler runs several chunk freezes against
@@ -130,6 +141,11 @@ type rowKey struct {
 type csvSink struct {
 	mu   sync.Mutex
 	rows map[rowKey]*series // every signal is one sample on a (file, row) key
+
+	// hotBurst accumulates the current hot ledger's HotPhase durations so
+	// HotPhase can reconstruct the per-ledger end-to-end ingest_total (the
+	// phases partition the per-ledger total). Guarded by mu.
+	hotBurst time.Duration
 
 	// lastSeq mirrors the loop's last-committed gauge (Metrics.LastCommitted,
 	// set once per ingested ledger) so the hot driver can verify the bounded
@@ -147,9 +163,40 @@ func newCSVSink() *csvSink {
 	return &csvSink{rows: make(map[rowKey]*series)}
 }
 
-// HotPhase records one phase of one hot ledger ingest.
+// HotPhase records one phase of one hot ledger ingest into hot.csv, and
+// reconstructs the per-ledger end-to-end ingest_total for driver.csv from the
+// phase burst.
+//
+// The production hot loop (runIngestionLoop) is a SINGLE goroutine, so HotPhase
+// signals arrive as strict per-ledger bursts in hotchunk.Phase order:
+// extract → ledgers → txhash → events → commit → apply, one burst per ledger.
+// The phases partition the per-ledger IngestLedger wall-clock, so their sum IS
+// the per-ledger total — a number per-phase percentiles can't recover
+// (percentiles don't sum). PhaseExtract (always first) resets the accumulator
+// for a new ledger; PhaseApply (terminal, emitted on the success path only —
+// never the failed phase) records one ingest_total sample with items=1. A
+// failed ledger never reaches PhaseApply, so it contributes nothing (the run
+// aborts and partial CSVs are written anyway).
+//
+// The accumulator is mutex-guarded so the sink stays safe under the MetricSink
+// contract regardless; only the production single-writer pattern yields
+// meaningful sums (interleaved bursts would sum across ledgers, never race).
 func (s *csvSink) HotPhase(phase hotchunk.Phase, d time.Duration, items int, _ error) {
 	s.observe(fileHot, phase.String(), d, items)
+
+	// Accumulator under its own critical section, released before the observe
+	// below so the two locks are sequential, never nested.
+	s.mu.Lock()
+	if phase == hotchunk.PhaseExtract {
+		s.hotBurst = 0
+	}
+	s.hotBurst += d
+	total := s.hotBurst
+	s.mu.Unlock()
+
+	if phase == hotchunk.PhaseApply {
+		s.observe(fileDriver, driverIngestTotal, total, 1)
+	}
 }
 
 // ColdIngest records one cold ingester's per-chunk total.
@@ -183,8 +230,9 @@ func (s *csvSink) LastCommitted(lastCommitted uint32) {
 	s.lastSeq.Store(lastCommitted)
 }
 
-// The remaining observability signals are lifecycle gauges/counters no bench
-// run drives; they are accepted and dropped.
+// The remaining observability signals carry no useful bench signal and are
+// accepted and dropped — Prune does fire (from each index build's eager
+// sweep) but its wall is already inside Rebuild; the others never fire.
 
 func (s *csvSink) RetentionFloor(uint32) {}
 
@@ -211,12 +259,6 @@ func (s *csvSink) observe(fileName, rowName string, d time.Duration, items int) 
 		s.rows[k] = sr
 	}
 	sr.observe(d, items)
-}
-
-// observeDriver records a driver-level row (driverRunWall) outside the sink
-// interfaces — timings only the bench driver itself can see.
-func (s *csvSink) observeDriver(name string, d time.Duration, items int) {
-	s.observe(fileDriver, name, d, items)
 }
 
 // lastCommittedSeq returns the highest ledger the hot loop reported committed.

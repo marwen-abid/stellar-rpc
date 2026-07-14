@@ -117,7 +117,7 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 		writePartialCSVs(logger, sink, opts.OutDir)
 		return err
 	}
-	sink.observeDriver(driverRunWall, time.Since(start), int(last-first+1))
+	sink.observe(fileDriver, driverRunWall, time.Since(start), int(last-first+1))
 
 	sink.logSummary(logger)
 	written, err := sink.writeCSVs(opts.OutDir)
