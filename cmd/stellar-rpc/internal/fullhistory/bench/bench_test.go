@@ -127,16 +127,14 @@ func TestRunColdFromPack(t *testing.T) {
 	assert.EqualValues(t, 1, ledgers["finalize"]["n"])
 
 	// Sub-tick (zero-duration) samples are excluded from n / n_items, so
-	// per-ledger txhash/events rows only bound loosely; the finalize rows are
+	// per-ledger events rows only bound loosely; the finalize rows are
 	// per-chunk and deterministic (txhash finalize items = total hashes).
 	txhash := readCSV(t, filepath.Join(csvDir, "txhash.csv"))
-	require.Contains(t, txhash, "extract")
 	require.Contains(t, txhash, "finalize")
 	assert.EqualValues(t, 1, txhash["finalize"]["n"])
 	assert.EqualValues(t, txLedgers, txhash["finalize"]["n_items"])
 
 	events := readCSV(t, filepath.Join(csvDir, "events.csv"))
-	require.Contains(t, events, "extract")
 	require.Contains(t, events, "write")
 	require.Contains(t, events, "finalize")
 	assert.EqualValues(t, 1, events["finalize"]["n"])
@@ -155,6 +153,11 @@ func TestRunColdFromPack(t *testing.T) {
 	assert.EqualValues(t, chunk.LedgersPerChunk, driver["ledgers_total"]["n_items"])
 	assert.EqualValues(t, txLedgers, driver["txhash_total"]["n_items"])
 	assert.EqualValues(t, txLedgers, driver["events_total"]["n_items"])
+
+	// The shared per-ledger ExtractLedgerEvents walk is ledger-scoped (no data
+	// type), so it reports as its own driver row; per-ledger samples bound
+	// loosely (sub-tick walks are excluded).
+	require.Contains(t, driver, "cold_extract")
 
 	// The cold artifacts landed at the Layout-resolved paths — including the
 	// cross-chunk txhash index the backfill builds beyond WriteColdChunk. The

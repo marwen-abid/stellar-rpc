@@ -41,6 +41,10 @@ const (
 	driverIndexRebuild = "index_rebuild" // cold only: one txhash index build incl. eager sweep (Metrics.Rebuild)
 	driverChunkTotal   = "chunk_total"   // ColdChunkTotal: per-chunk ColdService lifetime
 	driverTotalSuffix  = "_total"        // ColdIngest per data type: "<type>_total"
+	// cold only: the shared per-ledger ExtractLedgerEvents walk (ColdExtract) —
+	// ledger-scoped, belonging to no single data type, so it lands here rather
+	// than in a per-type CSV.
+	driverColdExtract = "cold_extract"
 	// hot only: per-ledger end-to-end ingest time, reconstructed as the sum of
 	// one ledger's HotPhase burst (per-phase percentiles can't be summed).
 	driverIngestTotal = "ingest_total"
@@ -57,15 +61,16 @@ type fileSpec struct {
 // fileSpecs is the whole report schema, in file emission order:
 //
 //   - one CSV per cold data type the ingest engine reports (ledgers.csv,
-//     txhash.csv, events.csv), one row per cold pipeline stage (extract →
-//     term_index → write → finalize) as reported via MetricSink.IngestStage;
+//     txhash.csv, events.csv), one row per cold pipeline stage (term_index →
+//     write → finalize) as reported via MetricSink.IngestStage;
 //   - hot.csv, one row per hot ingest phase, in hotchunk.Phase order;
 //   - driver.csv, the run-level aggregates: the cold scheduler's backfill wall
 //     and per-index-build rebuild rows (observability.Metrics), the engine's
 //     ColdChunkTotal, one "<type>_total" row per cold data type (ColdIngest),
-//     the hot per-ledger end-to-end ingest_total (reconstructed from each
-//     ledger's phase burst in HotPhase), and the hot bench's driver-observed
-//     run wall-clock.
+//     the shared per-ledger cold extract walk (ColdExtract), the hot
+//     per-ledger end-to-end ingest_total (reconstructed from each ledger's
+//     phase burst in HotPhase), and the hot bench's driver-observed run
+//     wall-clock.
 //
 // A label recorded outside this vocabulary is still reported: withUnknown
 // appends it after the known rows (or files) rather than silently dropping it.
@@ -73,20 +78,21 @@ type fileSpec struct {
 //nolint:gochecknoglobals // fixed report schema, read-only
 var fileSpecs = func() []fileSpec {
 	coldTypes := []string{ingest.DataTypeLedgers, ingest.DataTypeTxhash, ingest.DataTypeEvents}
-	coldStages := []string{ingest.StageExtract, ingest.StageTermIndex, ingest.StageWrite, ingest.StageFinalize}
+	coldStages := []string{ingest.StageTermIndex, ingest.StageWrite, ingest.StageFinalize}
 
 	hotRows := make([]string, hotchunk.NumPhases)
 	for p := range hotchunk.NumPhases {
 		hotRows[p] = p.String()
 	}
 
-	driverRows := make([]string, 0, len(coldTypes)+5)
+	driverRows := make([]string, 0, len(coldTypes)+6)
 	driverRows = append(driverRows, driverBackfillWall, driverIndexRebuild, driverChunkTotal)
 	for _, dt := range coldTypes {
 		driverRows = append(driverRows, dt+driverTotalSuffix)
 	}
-	// ingest_total then run_wall keep the two hot rows grouped at the end.
-	driverRows = append(driverRows, driverIngestTotal, driverRunWall)
+	// cold_extract closes the cold rows; ingest_total then run_wall keep the
+	// two hot rows grouped at the end.
+	driverRows = append(driverRows, driverColdExtract, driverIngestTotal, driverRunWall)
 
 	specs := make([]fileSpec, 0, len(coldTypes)+2)
 	for _, dt := range coldTypes {
@@ -207,6 +213,13 @@ func (s *csvSink) ColdIngest(dataType string, d time.Duration, items int, _ erro
 // ColdChunkTotal records the per-chunk aggregate wall-clock.
 func (s *csvSink) ColdChunkTotal(d time.Duration) {
 	s.observe(fileDriver, driverChunkTotal, d, 0)
+}
+
+// ColdExtract records the shared per-ledger ExtractLedgerEvents walk —
+// ledger-scoped and type-less, so it lands in driver.csv (see
+// driverColdExtract).
+func (s *csvSink) ColdExtract(d time.Duration, items int, _ error) {
+	s.observe(fileDriver, driverColdExtract, d, items)
 }
 
 // IngestStage records one cold ingester's per-stage wall-clock.
