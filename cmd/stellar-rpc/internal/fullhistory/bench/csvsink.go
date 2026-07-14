@@ -6,11 +6,13 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/ingest"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/observability"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/hotchunk"
 )
 
@@ -29,15 +31,16 @@ const (
 	fileDriver = "driver" // driver.csv: per-chunk aggregate rows
 )
 
-// Driver-report row labels. chunk_wall, ingest_total and read_blocked are
-// observed by the bench drivers themselves (observeDriver); the rest arrive
+// Driver-report row labels. run_wall is observed by the hot bench driver
+// itself (observeDriver); backfill_wall and index_rebuild arrive through the
+// observability.Metrics signals the backfill scheduler emits; the rest arrive
 // through the MetricSink cold signals.
 const (
-	driverChunkWall   = "chunk_wall"   // per-chunk wall-clock incl. stream open, seen by the driver
-	driverIngestTotal = "ingest_total" // hot only: per-ledger end-to-end Ingest time (all phases, source wait excluded)
-	driverReadBlocked = "read_blocked" // hot only: wait on the source between ledgers
-	driverChunkTotal  = "chunk_total"  // ColdChunkTotal: per-chunk ColdService lifetime
-	driverTotalSuffix = "_total"       // ColdIngest per data type: "<type>_total"
+	driverBackfillWall = "backfill_wall" // cold only: RunBackfill's whole plan-and-execute wall (Metrics.Freeze)
+	driverIndexRebuild = "index_rebuild" // cold only: one txhash index build incl. eager sweep (Metrics.Rebuild)
+	driverChunkTotal   = "chunk_total"   // ColdChunkTotal: per-chunk ColdService lifetime
+	driverTotalSuffix  = "_total"        // ColdIngest per data type: "<type>_total"
+	driverRunWall      = "run_wall"      // hot only: whole-run wall-clock, seen by the driver
 )
 
 // fileSpec is one CSV file of the report: its basename (without .csv) and the
@@ -53,10 +56,10 @@ type fileSpec struct {
 //     txhash.csv, events.csv), one row per cold pipeline stage (extract →
 //     term_index → write → finalize) as reported via MetricSink.IngestStage;
 //   - hot.csv, one row per hot ingest phase, in hotchunk.Phase order;
-//   - driver.csv, the per-chunk aggregates: the driver-observed chunk
-//     wall-clock, the engine's ColdChunkTotal, one "<type>_total" row per
-//     cold data type (ColdIngest), and the hot bench's per-ledger ingest and
-//     source-wait rows.
+//   - driver.csv, the run-level aggregates: the cold scheduler's backfill wall
+//     and per-index-build rebuild rows (observability.Metrics), the engine's
+//     ColdChunkTotal, one "<type>_total" row per cold data type (ColdIngest),
+//     and the hot bench's driver-observed run wall-clock.
 //
 // A label recorded outside this vocabulary is still reported: withUnknown
 // appends it after the known rows (or files) rather than silently dropping it.
@@ -72,11 +75,11 @@ var fileSpecs = func() []fileSpec {
 	}
 
 	driverRows := make([]string, 0, len(coldTypes)+4)
-	driverRows = append(driverRows, driverChunkWall, driverChunkTotal)
+	driverRows = append(driverRows, driverBackfillWall, driverIndexRebuild, driverChunkTotal)
 	for _, dt := range coldTypes {
 		driverRows = append(driverRows, dt+driverTotalSuffix)
 	}
-	driverRows = append(driverRows, driverIngestTotal, driverReadBlocked)
+	driverRows = append(driverRows, driverRunWall)
 
 	specs := make([]fileSpec, 0, len(coldTypes)+2)
 	for _, dt := range coldTypes {
@@ -108,23 +111,36 @@ type rowKey struct {
 	file, row string
 }
 
-// csvSink is an ingest.MetricSink that records every signal in memory and, on
-// writeCSVs, aggregates them into percentile CSVs
-// (stage,n,n_items,total_ns,p50_ns,p90_ns,p99_ns,max_ns) laid out per
+// csvSink is an ingest.MetricSink AND an observability.Metrics that records
+// every signal in memory and, on writeCSVs, aggregates them into percentile
+// CSVs (stage,n,n_items,total_ns,p50_ns,p90_ns,p99_ns,max_ns) laid out per
 // fileSpecs. n counts only non-zero-duration samples (an empty ledger's
 // zero-duration stage does not skew percentiles) and n_items sums each
 // included sample's natural item count. Rows with no included samples — and
 // files with no rows — are suppressed.
 //
+// Of the observability signals only the durations a bench run produces are
+// recorded (Freeze — the backfill wall — and Rebuild — one index build each);
+// LastCommitted is tracked as a gauge for the hot driver's completion check,
+// and the rest (lifecycle gauges/counters no bench run drives) are dropped.
+//
 // All methods are safe for concurrent use (one mutex), as the MetricSink
-// contract requires: the cold drivers run several WriteColdChunk workers
-// against one sink.
+// contract requires: the backfill scheduler runs several chunk freezes against
+// one sink.
 type csvSink struct {
 	mu   sync.Mutex
 	rows map[rowKey]*series // every signal is one sample on a (file, row) key
+
+	// lastSeq mirrors the loop's last-committed gauge (Metrics.LastCommitted,
+	// set once per ingested ledger) so the hot driver can verify the bounded
+	// run reached its final ledger.
+	lastSeq atomic.Uint32
 }
 
-var _ ingest.MetricSink = (*csvSink)(nil)
+var (
+	_ ingest.MetricSink     = (*csvSink)(nil)
+	_ observability.Metrics = (*csvSink)(nil)
+)
 
 // newCSVSink returns an empty recorder.
 func newCSVSink() *csvSink {
@@ -151,6 +167,37 @@ func (s *csvSink) IngestStage(dataType, stage string, d time.Duration, items int
 	s.observe(dataType, stage, d, items)
 }
 
+// Freeze records one backfill pass's whole plan-and-execute wall-clock.
+func (s *csvSink) Freeze(d time.Duration) {
+	s.observe(fileDriver, driverBackfillWall, d, 0)
+}
+
+// Rebuild records one txhash index build's wall-clock (including its eager
+// post-build sweep).
+func (s *csvSink) Rebuild(d time.Duration) {
+	s.observe(fileDriver, driverIndexRebuild, d, 0)
+}
+
+// LastCommitted tracks the hot loop's per-ledger committed gauge (see lastSeq).
+func (s *csvSink) LastCommitted(lastCommitted uint32) {
+	s.lastSeq.Store(lastCommitted)
+}
+
+// The remaining observability signals are lifecycle gauges/counters no bench
+// run drives; they are accepted and dropped.
+
+func (s *csvSink) RetentionFloor(uint32) {}
+
+func (s *csvSink) ChunkBoundary() {}
+
+func (s *csvSink) LiveHotChunks(int) {}
+
+func (s *csvSink) BackfillPass(time.Duration) {}
+
+func (s *csvSink) Discard(int, time.Duration) {}
+
+func (s *csvSink) Prune(int, time.Duration) {}
+
 // observe appends one sample to the (file, row) series, creating it on first
 // use. Every recording method lands here. (funcorder pins it below the
 // exported methods it serves.)
@@ -166,11 +213,15 @@ func (s *csvSink) observe(fileName, rowName string, d time.Duration, items int) 
 	sr.observe(d, items)
 }
 
-// observeDriver records a driver-level row (driverChunkWall, driverReadBlocked)
-// outside the MetricSink interface — timings only the bench driver's own loop
-// can see.
+// observeDriver records a driver-level row (driverRunWall) outside the sink
+// interfaces — timings only the bench driver itself can see.
 func (s *csvSink) observeDriver(name string, d time.Duration, items int) {
 	s.observe(fileDriver, name, d, items)
+}
+
+// lastCommittedSeq returns the highest ledger the hot loop reported committed.
+func (s *csvSink) lastCommittedSeq() uint32 {
+	return s.lastSeq.Load()
 }
 
 // sumDriver returns the summed duration of a driver row's samples — the

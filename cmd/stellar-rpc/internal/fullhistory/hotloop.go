@@ -187,5 +187,63 @@ func runIngestionLoop(ctx context.Context, cfg ingestionLoopConfig) error {
 	// means the source stopped WITHOUT an error while the daemon ctx is still live —
 	// abnormal; surface a restartable error. (run()'s guard owns the clean-vs-restart
 	// classification.)
-	return errors.New("ingestion stream ended unexpectedly (source stopped with no error)")
+	return errStreamEnded
 }
+
+// errStreamEnded reports the stream stopping with no error while ctx is still
+// live. For the daemon's unbounded stream that is abnormal (a restartable
+// failure); for the bench's bounded stream it is the expected termination —
+// RunBoundedIngestionLoop remaps it to success.
+var errStreamEnded = errors.New("ingestion stream ended unexpectedly (source stopped with no error)")
+
+// BoundedIngestConfig configures RunBoundedIngestionLoop. Catalog must be bound
+// to the layout whose hot root the run writes; every hot DB the loop touches is
+// opened through it (the create bracket wipes any leftover chunk dir, so runs
+// always start from an empty DB).
+type BoundedIngestConfig struct {
+	// Stream must be bounded to the benchmarked range: its end is what
+	// terminates the loop (the loop itself always requests an unbounded range).
+	Stream ledgerbackend.LedgerStream
+	// Resume is the first ledger to ingest; its chunk's hot DB is opened fresh.
+	Resume  uint32
+	Catalog *catalog.Catalog
+	Logger  *supportlog.Entry
+	Metrics observability.Metrics
+	Sink    ingest.MetricSink
+}
+
+// RunBoundedIngestionLoop is the bench-ingest subcommand's entry to the
+// production ingestion loop: it opens the resume chunk's hot DB exactly as the
+// daemon's startup does, then runs runIngestionLoop UNCHANGED — same per-ledger
+// synced WriteBatch, same boundary handoff (close → open next → rebuild
+// HotService) — with two bench differences: completed chunks are published to a
+// no-op boundary (nothing is handed to the lifecycle/freeze, keeping hot numbers
+// isolated from the cold path), and the bounded stream's end is success rather
+// than a restartable failure.
+func RunBoundedIngestionLoop(ctx context.Context, cfg BoundedIngestConfig) error {
+	hotDB, err := openHotDBForChunk(cfg.Catalog, chunk.IDFromLedger(cfg.Resume), cfg.Logger)
+	if err != nil {
+		return fmt.Errorf("open hot DB for resume ledger %d: %w", cfg.Resume, err)
+	}
+	// The loop's first deferred statement takes ownership of the close.
+	err = runIngestionLoop(ctx, ingestionLoopConfig{
+		Stream:   cfg.Stream,
+		Resume:   cfg.Resume,
+		HotDB:    hotDB,
+		Catalog:  cfg.Catalog,
+		Boundary: nopBoundary{},
+		Logger:   cfg.Logger,
+		Metrics:  cfg.Metrics,
+		Sink:     cfg.Sink,
+	})
+	if errors.Is(err, errStreamEnded) {
+		return nil
+	}
+	return err
+}
+
+// nopBoundary discards boundary publications — bounded bench runs have no
+// lifecycle to hand completed chunks to.
+type nopBoundary struct{}
+
+func (nopBoundary) Publish(chunk.ID) {}

@@ -15,8 +15,10 @@ import (
 // TestCSVSinkExactOutput replays a fixed signal sequence from two goroutines
 // and asserts the exact CSV bytes: aggregation is order-independent (sorted
 // percentiles, summed totals), so the concurrent interleaving must not change
-// the report. Covers the zero-duration exclusion rule, row suppression, file
-// suppression (no txhash signals → no txhash.csv), and the fixed row orders.
+// the report. Covers both sink interfaces (ingest.MetricSink and the
+// observability.Metrics signals RunBackfill emits), the zero-duration
+// exclusion rule, row suppression, file suppression (no txhash signals → no
+// txhash.csv), and the fixed row orders.
 func TestCSVSinkExactOutput(t *testing.T) {
 	sink := newCSVSink()
 
@@ -31,7 +33,7 @@ func TestCSVSinkExactOutput(t *testing.T) {
 		sink.IngestStage("ledgers", "finalize", 7, 0)
 		sink.ColdIngest("ledgers", 100, 10000, nil)
 		sink.HotPhase(hotchunk.PhaseExtract, 10, 0, nil)
-		sink.observeDriver(driverChunkWall, 300, 0)
+		sink.Freeze(300)
 	}()
 	go func() {
 		defer wg.Done()
@@ -40,6 +42,7 @@ func TestCSVSinkExactOutput(t *testing.T) {
 		sink.IngestStage("ledgers", "write", 5, 1)
 		sink.ColdIngest("events", 50, 20, nil)
 		sink.ColdChunkTotal(200)
+		sink.Rebuild(40)
 		sink.HotPhase(hotchunk.PhaseCommit, 50, 0, nil)
 		sink.HotPhase(hotchunk.PhaseCommit, 60, 3, nil)
 	}()
@@ -60,7 +63,8 @@ func TestCSVSinkExactOutput(t *testing.T) {
 			"extract,1,0,10,10,10,10,10\n" +
 			"commit,2,3,110,60,60,60,60\n",
 		"driver.csv": csvHeader + "\n" +
-			"chunk_wall,1,0,300,300,300,300,300\n" +
+			"backfill_wall,1,0,300,300,300,300,300\n" +
+			"index_rebuild,1,0,40,40,40,40,40\n" +
 			"chunk_total,1,0,200,200,200,200,200\n" +
 			"ledgers_total,1,10000,100,100,100,100,100\n" +
 			"events_total,1,20,50,50,50,50,50\n",
@@ -84,13 +88,24 @@ func TestCSVSinkEmpty(t *testing.T) {
 	assert.Empty(t, entries)
 }
 
-func TestParseTypes(t *testing.T) {
-	cfg, err := parseTypes("ledgers,events")
-	require.NoError(t, err)
-	assert.True(t, cfg.Ledgers)
-	assert.False(t, cfg.Txhash)
-	assert.True(t, cfg.Events)
+// TestCSVSinkLastCommitted pins the gauge semantics the hot driver's
+// completion check relies on: latest value wins, and dropped observability
+// signals stay dropped.
+func TestCSVSinkLastCommitted(t *testing.T) {
+	sink := newCSVSink()
+	assert.Zero(t, sink.lastCommittedSeq())
+	sink.LastCommitted(41)
+	sink.LastCommitted(42)
+	assert.EqualValues(t, 42, sink.lastCommittedSeq())
 
-	_, err = parseTypes("ledgers,bogus")
-	require.ErrorContains(t, err, "bogus")
+	// Dropped signals must not fabricate CSV rows.
+	sink.RetentionFloor(7)
+	sink.ChunkBoundary()
+	sink.LiveHotChunks(3)
+	sink.BackfillPass(10)
+	sink.Discard(1, 10)
+	sink.Prune(2, 10)
+	written, err := sink.writeCSVs(t.TempDir())
+	require.NoError(t, err)
+	assert.Empty(t, written)
 }
