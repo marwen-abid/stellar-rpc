@@ -21,7 +21,8 @@
 # campaign config, the benchmarked binary's identity (binary.txt),
 # machine-metadata.txt, and metadata.json. The results directory is bundled to
 # /tmp/bench-results-<NAME>-<sha>-<stamp>.tgz (the EBS root on the devbox,
-# so the bundle survives an instance stop).
+# so the bundle survives an instance stop). When PUBLISH_URI is set the bundle
+# is also uploaded to <PUBLISH_URI>/<NAME>-<sha>-<stamp>/ by publish.sh.
 #
 # Config keys (the config is a sourced bash fragment; set only these):
 #   NAME             campaign name (required; charset [A-Za-z0-9._-])
@@ -42,6 +43,9 @@
 #   HOT_ITERS        bench-query hot --iters (default 200)
 #   WORKERS          bench-ingest cold --workers (default 1)
 #   HOT_NUM_LEDGERS  bench-ingest hot --num-ledgers (default 0 = whole range)
+#   PUBLISH_URI      object-storage root to publish the finished bundle to
+#                    (default empty = no publish). Must be gs:// or s3://; the
+#                    bundle lands at <PUBLISH_URI>/<NAME>-<sha>-<stamp>/.
 #   DATASETS         bash array of "name|kind|location|chunks" entries.
 #                    kind=packs-local: location is a local cold pack root
 #                      (the directory that contains ledgers/, events/,
@@ -105,6 +109,7 @@ COLD_ITERS=100
 HOT_ITERS=200
 WORKERS=1
 HOT_NUM_LEDGERS=0
+PUBLISH_URI=
 DATASETS=()
 
 _pre="$(compgen -v | sort)"
@@ -114,7 +119,7 @@ _post="$(compgen -v | sort)"
 for v in $(comm -13 <(printf '%s\n' "$_pre") <(printf '%s\n' "$_post")); do
   case "$v" in
     _pre | _post) ;;
-    *) die "config: unknown key '$v' (allowed: NAME REF INGEST QUERY CLOSE_INTERVAL RUNS QC COLD_ITERS HOT_ITERS WORKERS HOT_NUM_LEDGERS DATASETS)" ;;
+    *) die "config: unknown key '$v' (allowed: NAME REF INGEST QUERY CLOSE_INTERVAL RUNS QC COLD_ITERS HOT_ITERS WORKERS HOT_NUM_LEDGERS PUBLISH_URI DATASETS)" ;;
   esac
 done
 
@@ -140,6 +145,7 @@ for k in RUNS COLD_ITERS HOT_ITERS WORKERS; do
 done
 [[ $HOT_NUM_LEDGERS =~ $re_int ]] || die "config: HOT_NUM_LEDGERS must be an integer >= 0 (got '$HOT_NUM_LEDGERS')"
 [[ $QC =~ $re_qc ]] || die "config: QC must be a comma-separated integer list (got '$QC')"
+[ -z "$PUBLISH_URI" ] || [[ $PUBLISH_URI =~ ^(gs|s3):// ]] || die "config: PUBLISH_URI must be a gs:// or s3:// URI (got '$PUBLISH_URI')"
 [ "${#DATASETS[@]}" -ge 1 ] || die "config: DATASETS must list at least one dataset"
 
 # Parse "name|kind|location|chunks" entries into parallel arrays.
@@ -535,6 +541,9 @@ if [ "$QUERY_HOT" -eq 1 ]; then
 fi
 
 if [ "$DRY" -eq 1 ]; then
+  if [ -n "$PUBLISH_URI" ]; then
+    run "$SCRIPT_DIR/publish.sh" "$RES" "$PUBLISH_URI"
+  fi
   note "dry run complete"
   exit 0
 fi
@@ -543,3 +552,14 @@ write_machine_metadata
 write_campaign_metadata
 tar -C "$BENCH/results" -czf "$TARBALL" "$NAME-$SHA-$STAMP"
 note "campaign done: $TARBALL"
+
+# Publishing is a separate final step: the data is already safe in $RES and
+# $TARBALL, so a publish failure is not a benchmark failure — it exits 1 with
+# the exact retry command rather than corrupting the "campaign done" signal.
+if [ -n "$PUBLISH_URI" ]; then
+  if ! "$SCRIPT_DIR/publish.sh" "$RES" "$PUBLISH_URI"; then
+    note "publish failed — data is safe in $RES and $TARBALL; retry with: publish.sh $RES $PUBLISH_URI"
+    exit 1
+  fi
+  note "published: ${PUBLISH_URI%/}/$NAME-$SHA-$STAMP/"
+fi
