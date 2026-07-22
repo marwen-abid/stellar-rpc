@@ -103,7 +103,7 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 // with the source and profile flag sets bound.
 func newBenchCommand(
 	use, short string, src *sourceFlags, prof *profileFlags,
-	run func(ctx context.Context, logger *supportlog.Entry) error,
+	run func(ctx context.Context, logger *supportlog.Entry, cmd *cobra.Command) error,
 ) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use,
@@ -113,7 +113,7 @@ func newBenchCommand(
 			cmd.SilenceUsage = true
 			ctx, stop, logger := benchContext()
 			defer stop()
-			return prof.around(logger, func() error { return run(ctx, logger) })
+			return prof.around(logger, func() error { return run(ctx, logger, cmd) })
 		},
 	}
 	src.bind(cmd)
@@ -135,8 +135,8 @@ func newColdCommand() *cobra.Command {
 	cmd := newBenchCommand("cold",
 		"Benchmark cold ingestion: the daemon's backfill (chunk freezes + txhash index builds) over a chunk range",
 		&src, &prof,
-		func(ctx context.Context, logger *supportlog.Entry) error {
-			return runCold(ctx, logger, coldOptions{
+		func(ctx context.Context, logger *supportlog.Entry, cmd *cobra.Command) error {
+			return runCold(ctx, logger, cmd, coldOptions{
 				Source:     src.config(),
 				StartChunk: chunk.ID(startChunk),
 				NumChunks:  numChunks,
@@ -175,8 +175,8 @@ func newHotCommand() *cobra.Command {
 	cmd := newBenchCommand("hot",
 		"Benchmark hot ingestion: the daemon's live ingestion loop over a chunk range",
 		&src, &prof,
-		func(ctx context.Context, logger *supportlog.Entry) error {
-			return runHot(ctx, logger, hotOptions{
+		func(ctx context.Context, logger *supportlog.Entry, cmd *cobra.Command) error {
+			return runHot(ctx, logger, cmd, hotOptions{
 				Source:        src.config(),
 				StartChunk:    chunk.ID(startChunk),
 				NumChunks:     numChunks,

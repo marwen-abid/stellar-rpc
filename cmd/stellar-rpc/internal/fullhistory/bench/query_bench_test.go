@@ -11,6 +11,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/network"
 
+	"github.com/spf13/cobra"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 )
 
@@ -39,7 +40,7 @@ func TestRunQueryColdFromArtifacts(t *testing.T) {
 	chunkID := chunk.ID(0)
 	packDir, txLedgers := writeSourcePack(t, t.TempDir(), chunkID, chunk.LedgersPerChunk)
 	artifactRoot := t.TempDir()
-	require.NoError(t, runCold(context.Background(), testLogger(), coldOptions{
+	require.NoError(t, runCold(context.Background(), testLogger(), &cobra.Command{Use: "test"}, coldOptions{
 		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
 		StartChunk: chunkID,
 		NumChunks:  1,
@@ -51,7 +52,7 @@ func TestRunQueryColdFromArtifacts(t *testing.T) {
 	csvDir := filepath.Join(t.TempDir(), "csv")
 	knobs := testQueryKnobs([]int{1, 2})
 	knobs.OutDir = csvDir
-	require.NoError(t, runQueryCold(context.Background(), testLogger(), coldQueryOptions{
+	require.NoError(t, runQueryCold(context.Background(), testLogger(), &cobra.Command{Use: "test"}, coldQueryOptions{
 		queryKnobs:        knobs,
 		ColdRoot:          artifactRoot,
 		StartChunk:        chunkID,
@@ -107,7 +108,7 @@ func TestRunQueryHotFromIngestedDB(t *testing.T) {
 	chunkID := chunk.ID(0)
 	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, numLedgers)
 	hotRoot := t.TempDir()
-	require.NoError(t, runHot(context.Background(), testLogger(), hotOptions{
+	require.NoError(t, runHot(context.Background(), testLogger(), &cobra.Command{Use: "test"}, hotOptions{
 		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
 		StartChunk: chunkID,
 		NumChunks:  1,
@@ -123,7 +124,7 @@ func TestRunQueryHotFromIngestedDB(t *testing.T) {
 	knobs.PageSize = 2 // the 300-ledger fixture holds 3 transactions
 	knobs.SampleLedgers = numLedgers
 	knobs.OutDir = csvDir
-	require.NoError(t, runQueryHot(context.Background(), testLogger(), hotQueryOptions{
+	require.NoError(t, runQueryHot(context.Background(), testLogger(), &cobra.Command{Use: "test"}, hotQueryOptions{
 		queryKnobs: knobs,
 		HotRoot:    hotRoot,
 		Chunk:      chunkID,
@@ -156,7 +157,7 @@ func TestRunQueryHotFromIngestedDB(t *testing.T) {
 func TestRunQueryHotRefusesMissingDB(t *testing.T) {
 	knobs := testQueryKnobs([]int{1})
 	knobs.OutDir = t.TempDir()
-	err := runQueryHot(context.Background(), testLogger(), hotQueryOptions{
+	err := runQueryHot(context.Background(), testLogger(), &cobra.Command{Use: "test"}, hotQueryOptions{
 		queryKnobs: knobs,
 		HotRoot:    t.TempDir(),
 		Chunk:      chunk.ID(0),
@@ -169,7 +170,7 @@ func TestRunQueryHotRefusesMissingDB(t *testing.T) {
 func TestRunQueryColdRefusesMissingArtifacts(t *testing.T) {
 	knobs := testQueryKnobs([]int{1})
 	knobs.OutDir = t.TempDir()
-	err := runQueryCold(context.Background(), testLogger(), coldQueryOptions{
+	err := runQueryCold(context.Background(), testLogger(), &cobra.Command{Use: "test"}, coldQueryOptions{
 		queryKnobs: knobs,
 		ColdRoot:   t.TempDir(),
 		StartChunk: chunk.ID(0),

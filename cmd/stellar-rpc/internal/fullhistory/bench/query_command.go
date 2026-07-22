@@ -150,7 +150,7 @@ func newQueryColdCommand() *cobra.Command {
 			ctx, stop, logger := benchContext()
 			defer stop()
 			return prof.around(logger, func() error {
-				return runQueryCold(ctx, logger, coldQueryOptions{
+				return runQueryCold(ctx, logger, cmd, coldQueryOptions{
 					queryKnobs:        knobs,
 					ColdRoot:          coldDir,
 					StartChunk:        chunk.ID(chunkArg),
@@ -197,7 +197,7 @@ func newQueryHotCommand() *cobra.Command {
 			ctx, stop, logger := benchContext()
 			defer stop()
 			return prof.around(logger, func() error {
-				return runQueryHot(ctx, logger, hotQueryOptions{
+				return runQueryHot(ctx, logger, cmd, hotQueryOptions{
 					queryKnobs: knobs,
 					HotRoot:    hotDir,
 					Chunk:      chunk.ID(chunkArg),

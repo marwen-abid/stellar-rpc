@@ -12,6 +12,7 @@ import (
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/spf13/cobra"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/fullhistory/storage/stores/eventstore"
@@ -73,7 +74,8 @@ func validateChunkRange(start chunk.ID, numChunks int) error {
 // artifacts: per --types it sweeps the configured concurrency levels,
 // evicting the touched files from the OS page cache before every iteration
 // so reads pay real device latency, and reports per-cell percentile CSVs.
-func runQueryCold(ctx context.Context, logger *supportlog.Entry, opts coldQueryOptions) error {
+func runQueryCold(ctx context.Context, logger *supportlog.Entry, cmd *cobra.Command, opts coldQueryOptions) error {
+	startedAt := time.Now().UTC()
 	if err := opts.validate(); err != nil {
 		return err
 	}
@@ -95,6 +97,9 @@ func runQueryCold(ctx context.Context, logger *supportlog.Entry, opts coldQueryO
 	sink.logSummary(logger)
 	written, err := sink.writeCSVs(opts.OutDir)
 	if err != nil {
+		return err
+	}
+	if err := writeInvocationJSON(opts.OutDir, cmd, captureFlags(cmd), startedAt, time.Now().UTC()); err != nil {
 		return err
 	}
 	logger.Infof("wrote %d CSVs to %s", len(written), opts.OutDir)

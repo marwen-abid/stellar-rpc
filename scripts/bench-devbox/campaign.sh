@@ -18,8 +18,8 @@
 #          it to a writable path, e.g. BENCH=/tmp/bench)
 #
 # Results land in $BENCH/results/<NAME>-<sha>-<stamp>/ together with the
-# campaign config, the benchmarked binary's identity (binary.txt), and
-# machine-metadata.txt. The results directory is bundled to
+# campaign config, the benchmarked binary's identity (binary.txt),
+# machine-metadata.txt, and metadata.json. The results directory is bundled to
 # /tmp/bench-results-<NAME>-<sha>-<stamp>.tgz (the EBS root on the devbox,
 # so the bundle survives an instance stop).
 #
@@ -210,6 +210,7 @@ else
 fi
 BIN=$BENCH/bin/stellar-rpc-$SHA
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 RES=$BENCH/results/$NAME-$SHA-$STAMP
 TARBALL=/tmp/bench-results-$NAME-$SHA-$STAMP.tgz
 
@@ -445,6 +446,67 @@ write_machine_metadata() {
   } >"$RES/machine-metadata.txt" 2>&1
 }
 
+# write_campaign_metadata emits metadata.json, the machine-readable campaign
+# manifest: run identity, campaign config, datasets, and hardware facts.
+# Per-invocation detail (resolved flags, binary identity, timings) lives in
+# each --out directory's invocation.json; this file records what no single
+# invocation knows.
+write_campaign_metadata() {
+  local i token itype iid cpus chunks datasets_json=
+  local -a hw=()
+  for i in "${!DS_NAME[@]}"; do
+    chunks=${DS_CHUNKS[$i]// /, }
+    [ -z "$datasets_json" ] || datasets_json+=$',\n'
+    datasets_json+="    {\"name\": \"${DS_NAME[$i]}\", \"kind\": \"${DS_KIND[$i]}\", \"location\": \"${DS_LOC[$i]}\", \"chunks\": [$chunks]}"
+  done
+  if token=$(curl -m 2 -sf -X PUT http://169.254.169.254/latest/api/token \
+    -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null); then
+    itype=$(curl -m 2 -sH "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null || true)
+    iid=$(curl -m 2 -sH "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)
+    [ -z "$itype" ] || hw+=("\"instance_type\": \"$itype\"")
+    [ -z "$iid" ] || hw+=("\"instance_id\": \"$iid\"")
+  fi
+  hw+=("\"uname\": \"$(uname -srm)\"")
+  if cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null); then
+    hw+=("\"cpus\": $cpus")
+  fi
+  if [ -f /proc/meminfo ]; then
+    hw+=("\"mem_total_kb\": $(awk '/^MemTotal:/ {print $2}' /proc/meminfo)")
+  fi
+  local hardware_json
+  hardware_json=$(printf '    %s,\n' "${hw[@]}")
+  cat >"$RES/metadata.json" <<EOF
+{
+  "schema_version": 1,
+  "run_id": "$NAME-$SHA-$STAMP",
+  "campaign": {
+    "name": "$NAME",
+    "config_file": "$(basename "$CFG")",
+    "ref": "$REF",
+    "built_commit": "$BUILT_COMMIT",
+    "ingest": "$INGEST",
+    "query": "$QUERY",
+    "close_interval": "$CLOSE_INTERVAL",
+    "runs": $RUNS,
+    "query_concurrency": "$QC",
+    "cold_iters": $COLD_ITERS,
+    "hot_iters": $HOT_ITERS,
+    "workers": $WORKERS,
+    "hot_num_ledgers": $HOT_NUM_LEDGERS
+  },
+  "datasets": [
+$datasets_json
+  ],
+  "hardware": {
+${hardware_json%,}
+  },
+  "hostname": "$(hostname)",
+  "started_at": "$STARTED_AT",
+  "finished_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+}
+
 # --- campaign --------------------------------------------------------------------
 note "campaign $NAME → $RES"
 if [ "$DRY" -eq 1 ]; then
@@ -478,5 +540,6 @@ if [ "$DRY" -eq 1 ]; then
 fi
 
 write_machine_metadata
+write_campaign_metadata
 tar -C "$BENCH/results" -czf "$TARBALL" "$NAME-$SHA-$STAMP"
 note "campaign done: $TARBALL"
