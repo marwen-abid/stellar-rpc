@@ -74,6 +74,8 @@ func TestRelayEnvValidation(t *testing.T) {
 		{"no deadline", map[string]string{"DEADLINE_EPOCH": ""}, "DEADLINE_EPOCH"},
 		{"unparsable interval", map[string]string{"POLL_INTERVAL": "half a minute"}, "POLL_INTERVAL"},
 		{"zero debug cadence", map[string]string{"DEBUG_LOG_EVERY_POLLS": "0"}, "DEBUG_LOG_EVERY_POLLS"},
+		{"zero poll interval", map[string]string{"POLL_INTERVAL": "0"}, "POLL_INTERVAL"},
+		{"negative window", map[string]string{"WINDOW_SECONDS": "-1"}, "WINDOW_SECONDS"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setRelayEnv(t, tc.overrides)

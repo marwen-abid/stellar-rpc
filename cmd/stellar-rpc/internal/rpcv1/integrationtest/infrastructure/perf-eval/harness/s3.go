@@ -30,6 +30,15 @@ type Result struct {
 	TargetSHA     string          `json:"targetSha"`
 }
 
+// Verdict values a box publishes (the bench-campaign launch job also seeds
+// VerdictPending so the result object exists for the campaign's whole life:
+// pending reads as still-running, and persistent fetch errors are a real
+// fault, not a not-yet-published object).
+const (
+	VerdictOK      = "ok"
+	VerdictPending = "pending"
+)
+
 // PublishResult uploads the run result to s3://bucket/key as one atomic object
 // that the gatherer can poll for.
 func PublishResult(
