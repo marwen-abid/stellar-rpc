@@ -43,10 +43,6 @@ func Gather(ctx context.Context) error {
 	}
 	s3Client := s3.NewFromConfig(awsCfg)
 	runner := &ssmRunner{client: ssm.NewFromConfig(awsCfg), instanceID: instanceID}
-
-	// A leftover object from a prior attempt (re-runs share RESULT_KEY) is "not
-	// published yet" so this attempt's box overwrites it; the box publishes the
-	// key only at the end, so 404s are the normal state here.
 	poller := &resultPoller{
 		s3Client: s3Client, runner: runner,
 		bucket: bucket, key: resultKey, runID: runID,
@@ -124,8 +120,7 @@ func (r *ssmRunner) debugTail(ctx context.Context, n int) string {
 }
 
 // writeNoVerdictComment is the no-verdict path: it writes the caller's
-// headline plus the box context to /tmp/timeout-comment.md. Each caller
-// records its own outputs, which differ (found=false vs. a relay state).
+// headline plus the box context to /tmp/timeout-comment.md.
 func writeNoVerdictComment(
 	ctx context.Context,
 	runner *ssmRunner,

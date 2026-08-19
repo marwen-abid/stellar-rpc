@@ -61,7 +61,13 @@ func (p *resultPoller) poll(ctx context.Context, until time.Time) (*Result, erro
 		if pollCount%p.debugEveryPolls == 0 {
 			logger.Infof("debug tail:\n%s", p.runner.debugTail(ctx, p.debugLogLines))
 		}
-		time.Sleep(p.interval)
+		// Never sleep past the window; the loop only rechecks at the top. The
+		// in-flight calls above can still overrun `until` by one fetch plus one
+		// debug tail, which the window sizing carries as margin: the AWS calls
+		// keep the caller's context rather than a deadline of their own.
+		if left := time.Until(until); left > 0 {
+			time.Sleep(min(p.interval, left))
+		}
 	}
 	// No verdict and no fault: the caller decides what a closed window means.
 	return nil, nil //nolint:nilnil
