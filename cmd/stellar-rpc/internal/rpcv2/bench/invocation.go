@@ -23,7 +23,13 @@ type invocationRecord struct {
 	Binary        binaryInfo        `json:"binary"`
 	Hostname      string            `json:"hostname"`
 	StartedAt     string            `json:"startedAt"`
-	FinishedAt    string            `json:"finishedAt"`
+	// FinishedAt is absent in the record written at start, so a record without
+	// it is a run that was killed before it finished.
+	FinishedAt string `json:"finishedAt,omitempty"`
+	// Extra carries facts the run resolved for itself rather than read off a
+	// flag, such as whether page-cache eviction ran. Absent when none were
+	// recorded.
+	Extra map[string]string `json:"extra,omitempty"`
 	// Error carries a failed run's error message; absent on a successful run.
 	Error string `json:"error,omitempty"`
 }
@@ -36,14 +42,23 @@ type binaryInfo struct {
 	Branch         string `json:"branch"`
 }
 
-// writeInvocationJSON writes an invocation record as JSON to outDir/invocation.json.
-// startedAt and finishedAt should be UTC times. runErr is the run's outcome: nil
-// for a successful run, otherwise its message lands in the record's error field.
-// The JSON is formatted with indentation and a trailing newline.
+// writeStartInvocationJSON writes the record of a run that has just started:
+// command, flags and start time, with no finishedAt and no error. The write at
+// the end of the run overwrites the same file.
+func writeStartInvocationJSON(
+	outDir string, cmd *cobra.Command, flags, extra map[string]string, startedAt time.Time,
+) error {
+	return writeInvocationJSON(outDir, cmd, flags, extra, startedAt, time.Time{}, nil)
+}
+
+// writeInvocationJSON writes an invocation record to outDir/invocation.json,
+// replacing any existing file. A zero finishedAt leaves the field out, which is
+// how a run in progress records itself; a non-nil runErr's message lands in the
+// error field. Indented JSON with a trailing newline.
 func writeInvocationJSON(
 	outDir string,
 	cmd *cobra.Command,
-	flags map[string]string,
+	flags, extra map[string]string,
 	startedAt, finishedAt time.Time,
 	runErr error,
 ) error {
@@ -52,6 +67,11 @@ func writeInvocationJSON(
 	var errMsg string
 	if runErr != nil {
 		errMsg = runErr.Error()
+	}
+
+	var finished string
+	if !finishedAt.IsZero() {
+		finished = finishedAt.UTC().Format(time.RFC3339)
 	}
 
 	record := invocationRecord{
@@ -66,8 +86,11 @@ func writeInvocationJSON(
 		},
 		Hostname:   hostname,
 		StartedAt:  startedAt.UTC().Format(time.RFC3339),
-		FinishedAt: finishedAt.UTC().Format(time.RFC3339),
+		FinishedAt: finished,
 		Error:      errMsg,
+	}
+	if len(extra) > 0 {
+		record.Extra = extra
 	}
 
 	data, err := json.MarshalIndent(record, "", "  ")
