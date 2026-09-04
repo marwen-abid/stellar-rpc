@@ -249,8 +249,6 @@ func measuredRequests(rps float64, duration time.Duration) int {
 }
 
 // timed runs fn and returns a sample with fn's run time as service.
-//
-//nolint:unparam // stage is set by the txhash body in bench-query/02-read-path, the next PR in this stack
 func timed(stage string, fn func() (int, error)) (cellSample, error) {
 	start := time.Now()
 	items, err := fn()
