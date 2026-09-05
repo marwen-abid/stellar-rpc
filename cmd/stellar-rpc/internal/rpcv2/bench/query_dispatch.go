@@ -158,7 +158,7 @@ func runPacedLeg(
 			leg.wg.Wait()
 			return legResult{}, err
 		}
-		leg.launch(pos, due, pos >= warmup)
+		leg.launch(pos, due, schedule.clock(), pos >= warmup)
 	}
 	leg.wg.Wait()
 	res := leg.result(schedule.dueForPos(warmup))
@@ -167,12 +167,12 @@ func runPacedLeg(
 }
 
 // launch runs position pos's request on its own goroutine when a slot is free
-// and sheds it otherwise. A measured position records its lag whether or not it
-// is shed; a warmup position records nothing. Called from the dispatch
-// goroutine only.
-func (l *pacedLeg) launch(pos int, due time.Time, measured bool) {
+// and sheds it otherwise. A measured position records its lag, now minus due,
+// whether or not it is shed; a warmup position records nothing. Called from the
+// dispatch goroutine only.
+func (l *pacedLeg) launch(pos int, due, now time.Time, measured bool) {
 	if measured {
-		l.lags = append(l.lags, max(time.Since(due), 0))
+		l.lags = append(l.lags, max(now.Sub(due), 0))
 	}
 	select {
 	case l.slots <- struct{}{}:
