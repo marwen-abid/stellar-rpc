@@ -1,8 +1,9 @@
 package bench
 
 import (
+	"errors"
 	"fmt"
-	"os"
+	"io/fs"
 	"time"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
@@ -77,7 +78,7 @@ func (f *queryFixture) evictColdArtifacts() (int, error) {
 	evicted := 0
 	for _, path := range f.EvictPaths {
 		if err := evictFile(path); err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
 			return evicted, fmt.Errorf("evict %s from the page cache: %w", path, err)
