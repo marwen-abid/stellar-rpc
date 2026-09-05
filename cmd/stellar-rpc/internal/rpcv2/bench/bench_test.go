@@ -55,11 +55,9 @@ func writeSourcePack(t *testing.T, root string, chunkID chunk.ID, numLedgers uin
 	return packRoot, txLedgers
 }
 
-// writeDenseSourcePack materializes a source ledger pack for chunkID under
-// root/ledgers holding numLedgers ledgers from the chunk's first sequence, each
-// carrying txPerLedger transactions. It returns the ledgers tree root. Tests
-// that measure how a sample spreads over ledgers need a fixture whose ledgers
-// hold more transactions than one ledger may contribute.
+// writeDenseSourcePack writes a source pack for chunkID under root/ledgers with
+// numLedgers ledgers of txPerLedger transactions each. It returns the ledgers
+// tree root.
 func writeDenseSourcePack(
 	t *testing.T, root string, chunkID chunk.ID, numLedgers uint32, txPerLedger int,
 ) string {
@@ -92,10 +90,9 @@ func writeLedgerPack(
 	return layout.LedgersRoot()
 }
 
-// multiTxLCMBytes returns the marshaled bytes of a LedgerCloseMeta (V2) for
-// ledger seq carrying txCount transactions. Each transaction's random source
-// account gives it a distinct, valid pubnet hash, and its envelope is hashed
-// into the result pair, so the served by-hash path pairs the two back up.
+// multiTxLCMBytes returns the marshaled LedgerCloseMeta V2 for ledger seq with
+// txCount transactions. Each transaction has a random source account and a
+// result pair keyed by its envelope hash under the pubnet passphrase.
 func multiTxLCMBytes(t *testing.T, seq uint32, txCount int) []byte {
 	t.Helper()
 	envelopes := make([]xdr.TransactionEnvelope, txCount)

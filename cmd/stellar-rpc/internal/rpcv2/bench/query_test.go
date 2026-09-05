@@ -21,10 +21,8 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 )
 
-// TestNewQueryCommand builds the full command tree — executing every
-// markRequired call, whose panic on a bad flag name this test exists to catch
-// (main.go calls NewQueryCommand unconditionally at startup) — and pins each
-// subcommand's required flags.
+// TestNewQueryCommand builds the full command tree, which executes every
+// markRequired call, and checks each subcommand's required flags.
 func TestNewQueryCommand(t *testing.T) {
 	cmd := NewQueryCommand()
 	require.Equal(t, "bench-query", cmd.Use)
@@ -46,12 +44,8 @@ func TestNewQueryCommand(t *testing.T) {
 	}
 }
 
-// TestQueryCommandAcceptsRunnerArgv parses the argv the campaign runner emits,
-// verbatim and in its own order, through both subcommands. The runner is the
-// only caller in the campaign, so this argv IS the flag surface's contract: a
-// renamed flag, a dropped one, or a value format the flag cannot parse breaks a
-// campaign leg, not a local invocation. It also pins which tier binds --warmup,
-// since the runner passes it to the hot subcommand alone.
+// TestQueryCommandAcceptsRunnerArgv parses the argv the campaign runner emits
+// through both subcommands. The runner passes --warmup to hot only.
 func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -117,10 +111,8 @@ func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 	}
 }
 
-// TestQueryDefaultShapesMatchSLA pins the two read shapes the team SLA fixes:
-// getLedgers reads 10 ledgers per call and getEvents reads a small page of 10
-// matches. The campaign runner passes neither flag, so the defaults are the
-// shapes the SLA rows are measured at.
+// TestQueryDefaultShapesMatchSLA checks the default read shapes against the
+// team SLA. The campaign runner passes neither flag.
 func TestQueryDefaultShapesMatchSLA(t *testing.T) {
 	for _, name := range []string{"cold", "hot"} {
 		t.Run(name, func(t *testing.T) {
@@ -138,7 +130,6 @@ func TestQueryDefaultShapesMatchSLA(t *testing.T) {
 	}
 }
 
-// TestParseQueryTypes pins the accepted and rejected --types values.
 func TestParseQueryTypes(t *testing.T) {
 	got, err := parseQueryTypes("events,ledgers")
 	require.NoError(t, err)
@@ -150,7 +141,6 @@ func TestParseQueryTypes(t *testing.T) {
 	}
 }
 
-// TestParseTargetRPS pins the accepted and rejected --target-rps values.
 func TestParseTargetRPS(t *testing.T) {
 	got, err := parseTargetRPS("2,0.5,1")
 	require.NoError(t, err)
@@ -162,8 +152,6 @@ func TestParseTargetRPS(t *testing.T) {
 	}
 }
 
-// TestFormatRPS pins how a rate is spelled in a row label: the shortest decimal
-// that reads back as the same rate, whole rates without a trailing ".0".
 func TestFormatRPS(t *testing.T) {
 	for rps, want := range map[float64]string{0.5: "0.5", 1: "1", 1.67: "1.67", 300: "300"} {
 		assert.Equal(t, want, formatRPS(rps))
@@ -172,10 +160,7 @@ func TestFormatRPS(t *testing.T) {
 	assert.Equal(t, "txhash_r300_lag", queryDriverLegRow(queryTypeTxHash, 300, driverLegLagSuffix))
 }
 
-// TestQuerySpecs pins the report schema the results converter parses: one CSV
-// per query type carrying total_r<rate> and service_r<rate>, and driver.csv
-// carrying the fixture open, each leg's wall-clock and driver metrics, and the
-// peak RSS.
+// TestQuerySpecs pins the report schema the results converter parses.
 func TestQuerySpecs(t *testing.T) {
 	specs := querySpecs([]string{queryTypeLedgers, queryTypeEvents}, []float64{0.5, 2})
 
@@ -199,8 +184,6 @@ func TestQuerySpecs(t *testing.T) {
 	}, byName["driver"])
 }
 
-// TestQuerySpecsTxHashStages pins the found/miss rows the txhash file carries
-// beside the blended row the converter reads.
 func TestQuerySpecsTxHashStages(t *testing.T) {
 	specs := querySpecs([]string{queryTypeTxHash}, []float64{0.5, 2})
 	require.Equal(t, queryTypeTxHash, specs[0].name)
@@ -212,12 +195,9 @@ func TestQuerySpecsTxHashStages(t *testing.T) {
 	}, specs[0].rowOrder)
 }
 
-// TestQuerySinkWritesContractRows records one leg per type per rate and checks
-// the written CSVs carry the converter's row names — including the _lag and
-// _shed rows, whose samples are zero durations the ordinary filter would drop —
-// and that the _millirps row carries the leg's achieved rate times 1000, which
-// is the answered requests over the window the leg offered rather than over its
-// drain-inclusive wall.
+// TestQuerySinkWritesContractRows checks that the _lag and _shed rows keep
+// zero-duration samples and that _millirps is the answered requests over the
+// offered window, times 1000.
 func TestQuerySinkWritesContractRows(t *testing.T) {
 	const (
 		legWall    = 2 * time.Second
@@ -292,10 +272,6 @@ func TestQuerySinkWritesContractRows(t *testing.T) {
 	}
 }
 
-// TestRecordLegAllShed pins what a leg that answered nothing reports: its shed
-// count, a zero achieved rate rather than a missing row, and a dispatch lag per
-// measured position. Its own CSV is not written, because a leg with no request
-// to time has no latency distribution.
 func TestRecordLegAllShed(t *testing.T) {
 	const (
 		rps       = 4.0
@@ -330,11 +306,9 @@ func TestRecordLegAllShed(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(outDir, queryTypeLedgers+".csv"))
 }
 
-// TestOpenColdFixtureServesFrozenChunks runs bench-ingest cold to produce a real
-// frozen chunk, then opens the cold query fixture over that tree and reads
-// through it. It is the check that the fixture rebuilds the catalog state the
-// artifacts imply: bench-ingest throws its own catalog away, so a wrong
-// rebuild would leave every chunk unservable.
+// TestOpenColdFixtureServesFrozenChunks opens the cold fixture over a tree
+// bench-ingest produced. bench-ingest discards its catalog; the fixture
+// rebuilds it.
 func TestOpenColdFixtureServesFrozenChunks(t *testing.T) {
 	chunkID := chunk.ID(0)
 	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, chunk.LedgersPerChunk)
@@ -364,8 +338,6 @@ func TestOpenColdFixtureServesFrozenChunks(t *testing.T) {
 	require.NoError(t, err)
 	defer view.Release()
 
-	// The scan is the seam the ledgers and txpage benchmarks measure; running it
-	// here proves routing resolved the chunk cold and the pack reader opened.
 	from := chunkID.FirstLedger()
 	scan, err := view.ScanLedgers(from, from+9)
 	require.NoError(t, err)
@@ -377,11 +349,8 @@ func TestOpenColdFixtureServesFrozenChunks(t *testing.T) {
 	}
 	assert.Equal(t, from+10, next, "the scan yielded every ledger in the range")
 
-	// The backfill built one partial window index; the fixture must have named
-	// it, else the by-hash lookup has nothing to probe. The view opens the .idx
-	// on the first probe, not here, so resolving a hash the chunk really holds
-	// is what proves the fixture named the right window: a wrong coverage
-	// resolves to a path that does not exist and the probe fails.
+	// The view opens the .idx on the first probe; a wrong window coverage fails
+	// there.
 	idxs, err := view.ColdTxIndexes()
 	require.NoError(t, err)
 	require.Len(t, idxs, 1)
@@ -396,15 +365,10 @@ func TestOpenColdFixtureServesFrozenChunks(t *testing.T) {
 	assert.LessOrEqual(t, seq, f.LastLedger)
 }
 
-// testRNG is a fixed-seed generator for the corpus samplers the tests drive
-// directly.
 func testRNG() *rand.Rand { return rand.New(rand.NewPCG(defaultSeed, defaultSeed)) }
 
-// testQueryPlan is the run the end-to-end tests drive: every type at two rates,
-// over legs short enough to stay quick and fast enough that each still measures
-// tens of requests (10 at 50 rps, 40 at 200 rps). The spans are small because
-// the fixture chunk is synthetic, and the miss fraction is high enough that a
-// short leg reliably produces both a found and a not-found lookup.
+// testQueryPlan is the plan the end-to-end tests run: every type at two rates,
+// 10 requests per leg at 50 rps and 40 at 200 rps.
 func testQueryPlan() queryPlan {
 	return queryPlan{
 		Types:        allQueryTypes,
@@ -420,10 +384,6 @@ func testQueryPlan() queryPlan {
 	}
 }
 
-// TestRunQueryCold is the cold end-to-end: ingest a chunk, then run every query
-// type over its frozen artifacts and check the report the results converter
-// will read — one CSV per type carrying a total_r<rate> row per leg, and
-// driver.csv carrying the matching leg walls plus the setup rows.
 func TestRunQueryCold(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldRoot := ingestColdChunk(t, chunkID)
@@ -444,19 +404,14 @@ func TestRunQueryCold(t *testing.T) {
 	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
 	require.Contains(t, driver, "open")
 	assert.EqualValues(t, 1, driver["open"]["n_items"], "one chunk opened")
-	// One eviction pass runs per leg, but the sink drops zero-duration samples
-	// and off Linux the pass is a no-op that finishes inside a timer tick — so
-	// the row's presence and the artifacts it named are what can be asserted
-	// everywhere, not the sample count.
+	// Off Linux the eviction pass is a no-op and the sink drops its zero-duration
+	// samples; only the row's presence and item count hold on every platform.
 	require.Contains(t, driver, "evict", "a cold leg evicts before it measures")
 	assert.LessOrEqual(t, driver["evict"]["n"], int64(len(plan.Types)*len(plan.TargetRPS)),
 		"at most one eviction pass per leg")
 	assert.Positive(t, driver["evict"]["n_items"], "the eviction pass named some artifacts")
 }
 
-// TestRunQueryHot is the hot end-to-end: ingest a chunk into a hot database,
-// then run every query type against it. It also covers the warmup requests,
-// which only the hot tier dispatches.
 func TestRunQueryHot(t *testing.T) {
 	const ingested = 400
 	chunkID := chunk.ID(0)
@@ -487,12 +442,9 @@ func TestRunQueryHot(t *testing.T) {
 	assert.NotContains(t, driver, "evict", "a hot run has no page-cache artifacts to evict")
 }
 
-// assertQueryReport checks a finished run's CSVs against the converter's
-// contract: every leg present, its sample count exactly the number of requests
-// the leg scheduled, and every leg's wall and driver metrics recorded in
-// driver.csv. It also checks txhash's found/miss rows partition the blended
-// row, which is the property that lets the split be reported without touching
-// the row the converter reads.
+// assertQueryReport checks a run's CSVs: every leg present with one sample per
+// scheduled request, its driver rows written, and txhash's found and miss rows
+// partitioning the total row.
 func assertQueryReport(t *testing.T, csvDir string, plan queryPlan) {
 	t.Helper()
 	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
@@ -524,10 +476,9 @@ func assertQueryReport(t *testing.T, csvDir string, plan queryPlan) {
 	}
 }
 
-// assertLegDriverRows checks the four driver rows one leg writes: its wall, its
-// achieved rate, its dispatch-lag distribution (one sample per measured
-// position, shed positions included, zeros kept), and its shed count, which a
-// leg the fixture kept up with reports as zero.
+// assertLegDriverRows checks the four driver rows of one leg: wall, achieved
+// rate, dispatch lag (one sample per measured position, shed included) and
+// shed count.
 func assertLegDriverRows(
 	t *testing.T, driver map[string]map[string]int64, qtype string, rps float64, measured int64,
 ) {
@@ -551,7 +502,7 @@ func assertLegDriverRows(
 }
 
 // ingestColdChunk runs bench-ingest cold over a synthetic pack and returns the
-// frozen artifact root, which is what a cold query run reads.
+// frozen artifact root.
 func ingestColdChunk(t *testing.T, chunkID chunk.ID) string {
 	t.Helper()
 	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, chunk.LedgersPerChunk)
@@ -567,10 +518,6 @@ func ingestColdChunk(t *testing.T, chunkID chunk.ID) string {
 	return coldRoot
 }
 
-// TestQueryRejectsWrongPassphrase pins the corpus build failing loudly on a
-// passphrase the dataset was not signed under. Without the check every lookup
-// would report not-found and the run would publish the miss path's latency
-// under the hit path's name.
 func TestQueryRejectsWrongPassphrase(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldRoot := ingestColdChunk(t, chunkID)
@@ -588,12 +535,6 @@ func TestQueryRejectsWrongPassphrase(t *testing.T) {
 	require.ErrorContains(t, err, "--network-passphrase")
 }
 
-// TestOpenColdFixtureWithoutTxHashIndex pins what a cold tree carrying no
-// tx-hash window index does to the open, which depends on what the run asked
-// for. With txhash among the types every by-hash lookup would fail once the legs
-// started, so the open fails first and names the directory the index belongs in.
-// Without txhash the open succeeds and warns: the other three types never read
-// the index.
 func TestOpenColdFixtureWithoutTxHashIndex(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldRoot := ingestColdChunk(t, chunkID)
@@ -629,8 +570,6 @@ func TestOpenColdFixtureWithoutTxHashIndex(t *testing.T) {
 	})
 }
 
-// warningMessages joins a captured log's messages so a test can assert one of
-// them carries a phrase.
 func warningMessages(entries []logrus.Entry) string {
 	messages := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -639,8 +578,6 @@ func warningMessages(entries []logrus.Entry) string {
 	return strings.Join(messages, "\n")
 }
 
-// TestEvictionStateRecordsPlatform pins what invocation.json says about
-// eviction: what was asked for, and whether this platform could do it.
 func TestEvictionStateRecordsPlatform(t *testing.T) {
 	assert.Equal(t, "off", evictionState(false))
 	if evictSupported {
@@ -650,9 +587,6 @@ func TestEvictionStateRecordsPlatform(t *testing.T) {
 	assert.Equal(t, "unsupported-on-this-platform", evictionState(true))
 }
 
-// TestOpenColdFixtureRejectsMissingChunk pins the open failing with the chunk
-// named when the dataset does not cover the requested range, rather than
-// deferring an unreadable ErrUnavailable to every query.
 func TestOpenColdFixtureRejectsMissingChunk(t *testing.T) {
 	_, _, err := openColdFixture(testLogger(), coldQueryOptions{
 		ColdRoot:   t.TempDir(),
@@ -662,10 +596,6 @@ func TestOpenColdFixtureRejectsMissingChunk(t *testing.T) {
 	require.ErrorContains(t, err, "no ledger pack")
 }
 
-// TestOpenHotFixtureServesHotChunk runs bench-ingest hot to produce a real hot
-// database, then opens the hot query fixture over it and reads through it. It
-// also pins the sampled range: the fixture trusts what the database committed,
-// not the chunk's nominal span, and --sample-ledgers narrows that further.
 func TestOpenHotFixtureServesHotChunk(t *testing.T) {
 	const ingested = 50
 	chunkID := chunk.ID(0)
@@ -703,7 +633,6 @@ func TestOpenHotFixtureServesHotChunk(t *testing.T) {
 		}
 		assert.Equal(t, ingested, seqs)
 
-		// One published handle means one hot index for the by-hash lookup.
 		assert.Len(t, view.HotTxHashIndexes(), 1)
 	})
 
@@ -726,8 +655,6 @@ func TestOpenHotFixtureServesHotChunk(t *testing.T) {
 	})
 }
 
-// TestOpenHotFixtureRejectsMissingDatabase pins the ready-key open refusing to
-// fabricate an empty database for a chunk that was never ingested.
 func TestOpenHotFixtureRejectsMissingDatabase(t *testing.T) {
 	_, _, err := openHotFixture(testLogger(), hotQueryOptions{HotRoot: t.TempDir(), Chunk: chunk.ID(3)})
 	require.Error(t, err)

@@ -22,11 +22,6 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
-// TestCorpusSpansManyLedgersOnADenseDataset pins the property the per-ledger cap
-// exists for. On a dataset whose ledgers each carry more transactions than the
-// cap, the pool still covers corpusTargetHashes/corpusMaxHashesPerLedger
-// ledgers: without the cap it fills from the first few ledgers it reads, and
-// every found lookup of the run then resolves against one of those few blobs.
 func TestCorpusSpansManyLedgersOnADenseDataset(t *testing.T) {
 	const txPerLedger = 4 * corpusMaxHashesPerLedger
 	f, release := openDenseHotFixture(t, 64, txPerLedger)
@@ -51,11 +46,6 @@ func TestCorpusSpansManyLedgersOnADenseDataset(t *testing.T) {
 	assert.Len(t, uniqueHashes(s.hashes), len(s.hashes), "a hash is sampled at most once")
 }
 
-// TestCorpusPairsEachHashWithItsLedger checks the sampler's bookkeeping against
-// the served by-hash path: every hash resolves to a ledger the sampler listed,
-// and the ledgers it listed are exactly the ones the hashes resolve to. The
-// draw picks hashes out of apply order, so a hash taken from one ledger and
-// recorded against another would otherwise go unnoticed.
 func TestCorpusPairsEachHashWithItsLedger(t *testing.T) {
 	f, release := openDenseHotFixture(t, 64, 4*corpusMaxHashesPerLedger)
 	defer release()
@@ -76,9 +66,6 @@ func TestCorpusPairsEachHashWithItsLedger(t *testing.T) {
 	assert.ElementsMatch(t, s.ledgers, seqs, "the pool's hashes come from the ledgers the sampler listed")
 }
 
-// TestCorpusTakesEveryHashOfALedgerBelowTheCap pins what the cap does not do. A
-// dataset whose ledgers hold fewer transactions than the cap contributes every
-// one of them, and fills the pool by reading more ledgers instead.
 func TestCorpusTakesEveryHashOfALedgerBelowTheCap(t *testing.T) {
 	const txPerLedger = 4
 	f, release := openDenseHotFixture(t, 256, txPerLedger)
@@ -98,9 +85,6 @@ func TestCorpusTakesEveryHashOfALedgerBelowTheCap(t *testing.T) {
 	assert.Len(t, uniqueHashes(s.hashes), len(s.hashes), "a hash is sampled at most once")
 }
 
-// TestCorpusSkipsLedgersWithoutTransactions pins that a ledger carrying no
-// transaction contributes nothing and counts as no coverage, so a dataset of
-// mostly empty ledgers cannot report a wider corpus than it has.
 func TestCorpusSkipsLedgersWithoutTransactions(t *testing.T) {
 	const numLedgers = 400
 	packDir, txLedgers := writeSourcePack(t, t.TempDir(), chunk.ID(0), numLedgers)
@@ -122,9 +106,6 @@ func TestCorpusSkipsLedgersWithoutTransactions(t *testing.T) {
 	}
 }
 
-// TestSampleHashesFromLedgerDrawsARandomSubset pins the per-ledger draw: a
-// random subset of the cap's size, not the ledger's opening transactions, and
-// the whole set when the ledger holds fewer than the cap.
 func TestSampleHashesFromLedgerDrawsARandomSubset(t *testing.T) {
 	parts := make([]sdkingest.LedgerTxParts, 64)
 	for i := range parts {
@@ -149,10 +130,6 @@ func TestSampleHashesFromLedgerDrawsARandomSubset(t *testing.T) {
 	assert.ElementsMatch(t, whole, sampleHashesFromLedger(testRNG(), few))
 }
 
-// TestCorpusLogsItsLedgerCoverage pins what the corpus build reports about
-// itself: the hash count, the ledger count and the ledger range it spans, plus
-// a warning when the whole pool came from one ledger, which makes every found
-// lookup of the run read that ledger.
 func TestCorpusLogsItsLedgerCoverage(t *testing.T) {
 	t.Run("many ledgers", func(t *testing.T) {
 		f, release := openDenseHotFixture(t, 8, 20)
@@ -175,7 +152,7 @@ func TestCorpusLogsItsLedgerCoverage(t *testing.T) {
 }
 
 // buildCorpusCapturingLogs builds the tx-hash corpus over f and returns the
-// coverage line it logged and every warning it raised.
+// coverage line it logged and the warnings it raised.
 func buildCorpusCapturingLogs(t *testing.T, f *queryFixture) (string, []string) {
 	t.Helper()
 	logger := testLogger()
@@ -198,12 +175,6 @@ func buildCorpusCapturingLogs(t *testing.T, f *queryFixture) (string, []string) 
 	return coverage, warnings
 }
 
-// TestVerifySampledHashReportsThePassphrase pins which of the two checks reports a
-// failure, since they send the operator to different places. A passphrase the
-// dataset was not signed under fails the envelope pairing, inside the very
-// ledger the hash was sampled from, and names --network-passphrase. A fixture
-// whose tx-hash index cannot resolve the hash pairs fine and fails the served
-// probe, which must not name the passphrase.
 func TestVerifySampledHashReportsThePassphrase(t *testing.T) {
 	f, release := openDenseHotFixture(t, 4, 4)
 	defer release()
@@ -231,17 +202,13 @@ func TestVerifySampledHashReportsThePassphrase(t *testing.T) {
 	})
 }
 
-// TestVerifySampledHashReportsAProbeFailure covers the other side of the split:
-// a cold fixture whose tx-hash window index is gone still pairs the envelope,
-// because the passphrase is right, and fails on the served lookup. The report
-// must name the probe and leave the passphrase out of it.
 func TestVerifySampledHashReportsAProbeFailure(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldRoot := ingestColdChunk(t, chunkID)
 	require.NoError(t, os.RemoveAll(geometry.NewLayout(coldRoot).TxHashIndexRoot()))
 
-	// The types exclude txhash, so the open only warns about the absent index
-	// and leaves the fixture to be probed here.
+	// With txhash absent from Types the open warns about the missing index and
+	// does not fail.
 	f, release, err := openColdFixture(testLogger(), coldQueryOptions{
 		ColdRoot:   coldRoot,
 		StartChunk: chunkID,
@@ -266,8 +233,8 @@ func TestVerifySampledHashReportsAProbeFailure(t *testing.T) {
 	assert.NotContains(t, err.Error(), "--network-passphrase")
 }
 
-// hashesPerLedger resolves every hash through the served by-hash path and
-// counts how many of them landed in each ledger.
+// hashesPerLedger resolves each hash through the served by-hash path and counts
+// the hashes per ledger.
 func hashesPerLedger(
 	t *testing.T, f *queryFixture, view *query.ReadView, hashes [][32]byte,
 ) map[uint32]int {
@@ -283,7 +250,6 @@ func hashesPerLedger(
 	return counts
 }
 
-// uniqueHashes returns the distinct hashes of the slice.
 func uniqueHashes(hashes [][32]byte) map[[32]byte]struct{} {
 	set := make(map[[32]byte]struct{}, len(hashes))
 	for _, h := range hashes {
@@ -292,8 +258,8 @@ func uniqueHashes(hashes [][32]byte) map[[32]byte]struct{} {
 	return set
 }
 
-// openDenseHotFixture ingests a pack whose ledgers each carry txPerLedger
-// transactions into a hot database and opens the query fixture over it.
+// openDenseHotFixture ingests numLedgers ledgers of txPerLedger transactions
+// each into a hot database and opens the query fixture over it.
 func openDenseHotFixture(t *testing.T, numLedgers uint32, txPerLedger int) (*queryFixture, func()) {
 	t.Helper()
 	packDir := writeDenseSourcePack(t, t.TempDir(), chunk.ID(0), numLedgers, txPerLedger)
@@ -301,8 +267,8 @@ func openDenseHotFixture(t *testing.T, numLedgers uint32, txPerLedger int) (*que
 }
 
 // openHotFixtureOverPack ingests numLedgers ledgers of chunk 0 from packDir
-// into a fresh hot database and returns the query fixture over it, with the
-// passphrase the fixture builders sign under.
+// into a fresh hot database and opens the query fixture over it under the
+// pubnet passphrase.
 func openHotFixtureOverPack(t *testing.T, packDir string, numLedgers uint32) (*queryFixture, func()) {
 	t.Helper()
 	chunkID := chunk.ID(0)
