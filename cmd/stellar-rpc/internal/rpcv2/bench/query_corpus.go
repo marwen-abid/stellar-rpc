@@ -77,7 +77,9 @@ func buildTxHashCorpus(
 
 	rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed*31+7))) //nolint:gosec // seed mixing
 	s := newTxHashSampler(rng)
-	for _, c := range f.Chunks {
+	for i, c := range f.Chunks {
+		// Each chunk fills the pool up to its share, so the pool spans the range.
+		s.target = corpusTargetHashes * (i + 1) / len(f.Chunks)
 		if err := s.sampleChunk(view, c, f.FirstLedger, f.LastLedger); err != nil {
 			return nil, err
 		}
@@ -99,6 +101,9 @@ func buildTxHashCorpus(
 type txHashSampler struct {
 	rng *rand.Rand
 
+	// target is the pool size sampleChunk stops at.
+	target int
+
 	// hashes is the pool.
 	hashes [][32]byte
 
@@ -109,7 +114,7 @@ type txHashSampler struct {
 }
 
 func newTxHashSampler(rng *rand.Rand) *txHashSampler {
-	return &txHashSampler{rng: rng, read: map[uint32]struct{}{}}
+	return &txHashSampler{rng: rng, target: corpusTargetHashes, read: map[uint32]struct{}{}}
 }
 
 // first returns the pool's first hash and the ledger it came from. The pool
@@ -134,7 +139,7 @@ func (s *txHashSampler) sampleChunk(view *query.ReadView, c chunk.ID, first, las
 	}
 
 	span := int(hi - lo + 1)
-	for reads := 0; reads < corpusMaxLedgerReads && len(s.hashes) < corpusTargetHashes; reads++ {
+	for reads := 0; reads < corpusMaxLedgerReads && len(s.hashes) < s.target; reads++ {
 		seq := lo + uint32(s.rng.IntN(span)) //nolint:gosec // span <= LedgersPerChunk
 		if _, drawn := s.read[seq]; drawn {
 			continue
