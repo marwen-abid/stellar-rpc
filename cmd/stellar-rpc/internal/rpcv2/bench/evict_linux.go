@@ -9,14 +9,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// evictSupported reports that this platform can drop a file's pages from the
-// OS page cache.
+// evictSupported reports whether this platform can drop a file's pages from
+// the OS page cache.
 const evictSupported = true
 
-// evictFile drops path's pages from the OS page cache via POSIX_FADV_DONTNEED.
-// fadvise targets the inode's page cache, not one descriptor, so a reader
-// already holding the file open is unaffected; offset 0 and length 0 mean the
-// whole file. The hint is reliable for clean pages, which frozen artifacts are.
+// evictFile drops path's pages from the OS page cache with POSIX_FADV_DONTNEED.
+// The hint targets the inode's page cache, so a reader holding the file open is
+// unaffected; offset 0 and length 0 mean the whole file. It is reliable only
+// for clean pages.
 func evictFile(path string) error {
 	f, err := os.Open(path)
 	if err != nil {

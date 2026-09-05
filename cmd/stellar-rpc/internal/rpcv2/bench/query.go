@@ -16,8 +16,7 @@ import (
 
 // NewQueryCommand returns the `bench-query` command tree: `cold` benchmarks
 // reads served from frozen artifacts, `hot` reads served from a hot chunk
-// database. Both measure through query.ReadView, the stable read seam, so a
-// store-reader refactor moves the numbers without moving the benchmark.
+// database. Both read through query.ReadView.
 func NewQueryCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bench-query",
@@ -27,11 +26,10 @@ func NewQueryCommand() *cobra.Command {
 	return cmd
 }
 
-// Defaults for the read-shape flags. The ledgers span and the events limit are
-// the request shapes the team SLA fixes (getLedgers max=10; getEvents 10
-// matches), so a default run measures the shapes the SLA rows quote; the txpage
-// span and limit are the v2 page caps; the miss fraction matches the share of
-// by-hash lookups a production node sees for a hash that never landed.
+// Read-shape flag defaults. The ledgers span and the events limit are the SLA
+// request shapes (getLedgers max=10, getEvents 10); the txpage span and limit
+// are the v2 page caps; the miss fraction is the production share of by-hash
+// lookups for a hash that never landed.
 const (
 	defaultLedgersSpan  = 10
 	defaultTxPageSpan   = 5
@@ -41,28 +39,25 @@ const (
 	defaultSeed         = 1
 )
 
-// Defaults for the two flags that shape a leg: long enough that a slow rate
-// schedules a useful number of requests, short enough that a four-type ladder
-// finishes in minutes; one modest rate, so a bare invocation runs one leg per type.
+// Leg flag defaults.
 const (
 	defaultLegDuration = 60 * time.Second
 	defaultTargetRPS   = "10"
 )
 
-// maxTargetRPS is the highest arrival rate --target-rps accepts: above it the
-// single dispatch loop's own speed is what gets measured.
+// maxTargetRPS is the highest arrival rate --target-rps accepts.
 const maxTargetRPS = 1_000_000
 
 // queryFlags is the flag set both bench-query subcommands share, beyond --out
-// and the profiling flags newBenchCommand binds. The spellings and value formats
-// of --types, --target-rps, --duration and --warmup are the campaign runner's
-// argv contract; the read-shape flags are bench-side only.
+// and the profiling flags newBenchCommand binds. The spellings and value
+// formats of --types, --target-rps, --duration and --warmup are the campaign
+// runner's argv contract.
 type queryFlags struct {
 	types       string
 	targetRPS   string
 	duration    time.Duration
 	warmup      int
-	warmupBound bool // bind --warmup (hot only; a cold leg evicts its page cache)
+	warmupBound bool // bind --warmup (hot only)
 
 	ledgersSpan  uint32
 	txPageSpan   uint32
@@ -146,8 +141,8 @@ func (f *queryFlags) plan() (queryPlan, error) {
 	}, nil
 }
 
-// parseQueryTypes splits --types, keeping the caller's order and rejecting an
-// empty list, an unknown type, or a repeat (a type names its own CSV file).
+// parseQueryTypes splits --types, in the caller's order. A type names its own
+// CSV file, so a repeat is an error.
 func parseQueryTypes(s string) ([]string, error) {
 	fields := strings.Split(s, ",")
 	types := make([]string, 0, len(fields))
@@ -168,10 +163,8 @@ func parseQueryTypes(s string) ([]string, error) {
 	return types, nil
 }
 
-// parseTargetRPS splits --target-rps into the arrival rates to run, keeping the
-// caller's order and rejecting an empty entry, a non-number, a rate that is not
-// a positive finite number, a rate above maxTargetRPS, or a repeat (a rate
-// names its leg's CSV rows).
+// parseTargetRPS splits --target-rps into arrival rates, in the caller's order.
+// A rate names its leg's CSV rows, so a repeat is an error.
 func parseTargetRPS(s string) ([]float64, error) {
 	fields := strings.Split(s, ",")
 	rates := make([]float64, 0, len(fields))

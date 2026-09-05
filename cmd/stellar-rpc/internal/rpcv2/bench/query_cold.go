@@ -59,10 +59,7 @@ func newQueryColdCommand() *cobra.Command {
 	return cmd
 }
 
-// evictionState is what invocation.json records about page-cache eviction: what
-// was asked for, and whether this platform could honor it. A cold number
-// measured without eviction is a warm number, so the distinction has to reach
-// the results.
+// evictionState is what invocation.json records under pageCacheEviction.
 func evictionState(requested bool) string {
 	switch {
 	case !requested:
@@ -76,24 +73,22 @@ func evictionState(requested bool) string {
 
 // coldQueryOptions configures one cold read benchmark run.
 type coldQueryOptions struct {
-	// ColdRoot is the layout root of the frozen artifacts to query. It is
-	// read-only apart from the run's scratch catalog, created and removed under it.
+	// ColdRoot is the layout root of the frozen artifacts. The run creates and
+	// removes a scratch catalog under it.
 	ColdRoot string
 
-	// StartChunk and NumChunks give the chunk range to query,
-	// [StartChunk, StartChunk+NumChunks); every chunk must be under ColdRoot.
+	// StartChunk and NumChunks give the chunk range [StartChunk, StartChunk+NumChunks).
 	StartChunk chunk.ID
 	NumChunks  int
 
-	// Plan is the validated --types × --target-rps ladder.
+	// Plan is the validated flags.
 	Plan queryPlan
 
 	// OutDir receives the CSV report.
 	OutDir string
 }
 
-// validate checks the flags and chunk range before runQueryCold touches the
-// filesystem.
+// validate checks the flags and the chunk range.
 func (o coldQueryOptions) validate() error {
 	if o.ColdRoot == "" {
 		return errors.New("--cold-dir is required")
@@ -101,9 +96,8 @@ func (o coldQueryOptions) validate() error {
 	if o.NumChunks < 1 {
 		return fmt.Errorf("--num-chunks must be >= 1, got %d", o.NumChunks)
 	}
-	// The frontier hot key sits one chunk above the range (see openColdFixture),
-	// so the range must end below the last valid chunk ID. uint64 so the sum
-	// cannot wrap before the compare.
+	// The frontier hot key (openColdFixture) sits one chunk above the range, so
+	// the range must end below maxChunkID. uint64: the sum must not wrap.
 	if end := uint64(o.StartChunk) + uint64(o.NumChunks) - 1; end >= uint64(maxChunkID) {
 		return fmt.Errorf("--start-chunk=%d with --num-chunks=%d ends at chunk %d, at or past the last valid chunk ID %d",
 			uint32(o.StartChunk), o.NumChunks, end, uint32(maxChunkID))
@@ -112,7 +106,7 @@ func (o coldQueryOptions) validate() error {
 }
 
 // runQueryCold benchmarks the cold read path: queries against the frozen
-// artifacts under --cold-dir, routed through a read view as a served request is.
+// artifacts under --cold-dir.
 func runQueryCold(ctx context.Context, logger *supportlog.Entry, opts coldQueryOptions) error {
 	if err := opts.validate(); err != nil {
 		return err
@@ -122,22 +116,17 @@ func runQueryCold(ctx context.Context, logger *supportlog.Entry, opts coldQueryO
 	})
 }
 
-// openColdFixture makes an on-disk frozen artifact tree servable and returns the
-// read fixture over it, plus the release that tears the fixture down.
+// openColdFixture rebuilds the catalog state a frozen artifact tree implies and
+// returns the read fixture over it, plus its release.
 //
-// bench-ingest cold writes its artifacts under a scratch catalog it discards, so
-// the tree arrives with files but no catalog naming them. This rebuilds that
-// state: every chunk in the range runs the freeze bracket for each kind whose
-// files are on disk; the tx-hash window index is committed under its own
-// bracket, its coverage read from the .idx filename; and the chunk one past the
-// range gets a "ready" hot key. That key is what makes the range complete:
-// LastCompleteChunk is the lowest ready hot chunk minus one, and NewReadView
-// fails without one. It carries no published handle, so routing resolves it to
-// no tier and no query can reach it.
-//
-// Retention is full-history from the range's first chunk, and the latest ledger
-// is the range's last. The fixture keeps NewRegistry: it has no hot handle to
-// publish.
+// The tree has no catalog: bench-ingest cold discards its scratch catalog. Each
+// chunk in the range runs the freeze bracket for each kind on disk; the tx-hash
+// window index is committed under its own bracket, its coverage read from the
+// .idx filename; the chunk one past the range gets a "ready" hot key with no
+// handle. LastCompleteChunk is the lowest ready hot chunk minus one, and
+// NewReadView fails without one; a hot key with no handle resolves to no tier.
+// Retention is full history from the range's first chunk; the latest ledger is
+// the range's last.
 func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFixture, func(), error) {
 	layout := geometry.NewLayout(opts.ColdRoot)
 	cat, releaseCat, err := openScratchCatalog(opts.ColdRoot, scratchPrefixQuery, layout, logger)
@@ -157,7 +146,7 @@ func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFix
 		release()
 		return nil, nil, err
 	}
-	// The frontier: a ready hot chunk above the range, no dir and no handle.
+	// The frontier: a ready hot chunk above the range, no dir, no handle.
 	if err := cat.FlipHotReady(end + 1); err != nil {
 		release()
 		return nil, nil, fmt.Errorf("mark frontier hot chunk %s ready: %w", end+1, err)
@@ -165,8 +154,7 @@ func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFix
 
 	registry := query.NewRegistry(cat, geometry.NewRetention(0, opts.StartChunk))
 	registry.SetLatestLedger(end.LastLedger(), query.UnknownCloseTime())
-	// Stamp the window edges' close times as startup.go does, so served requests
-	// do not pay a ledger decode to learn the latest close time.
+	// As startup.go does.
 	if err := adapters.SeedCloseTimes(registry); err != nil {
 		release()
 		return nil, nil, fmt.Errorf("seed close times: %w", err)
@@ -186,9 +174,8 @@ func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFix
 	return f, release, nil
 }
 
-// coldArtifactPaths lists every file the benchmarked chunks are served from,
-// each chunk's frozen artifacts plus the frozen tx-hash window indexes, read off
-// the catalog so it names exactly what routing will open.
+// coldArtifactPaths lists every file the chunks are served from: each chunk's
+// frozen artifacts and the frozen tx-hash window indexes, read off the catalog.
 func coldArtifactPaths(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.ID) []string {
 	var paths []string
 	for _, c := range chunks {
@@ -212,9 +199,8 @@ func coldArtifactPaths(cat *catalog.Catalog, layout geometry.Layout, chunks []ch
 	return paths
 }
 
-// freezeChunks runs the freeze bracket over each chunk for the artifact kinds on
-// disk. A chunk with no ledger pack fails the open: no query type can run
-// without it, and a later per-query ErrUnavailable would be harder to read.
+// freezeChunks runs the freeze bracket over each chunk for the artifact kinds
+// on disk. A chunk with no ledger pack is an error.
 func freezeChunks(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.ID) error {
 	for _, c := range chunks {
 		var present []geometry.Kind
@@ -238,8 +224,7 @@ func freezeChunks(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.I
 	return nil
 }
 
-// artifactOnDisk reports whether every file a (chunk, kind) artifact owns exists,
-// which is what a "frozen" key promises.
+// artifactOnDisk reports whether every file of a (chunk, kind) artifact exists.
 func artifactOnDisk(layout geometry.Layout, c chunk.ID, kind geometry.Kind) bool {
 	paths := layout.ArtifactPaths(c, kind)
 	if len(paths) == 0 {
@@ -253,7 +238,7 @@ func artifactOnDisk(layout geometry.Layout, c chunk.ID, kind geometry.Kind) bool
 	return true
 }
 
-// kindList renders an artifact-kind set for a log line.
+// kindList renders kinds for a log line.
 func kindList(kinds []geometry.Kind) string {
 	names := make([]string, len(kinds))
 	for i, k := range kinds {
@@ -262,15 +247,12 @@ func kindList(kinds []geometry.Kind) string {
 	return strings.Join(names, ",")
 }
 
-// commitDiskTxHashIndex commits the tx-hash window index covering [lo, hi] under
-// its freeze bracket, so ReadView.ColdTxHashIndexCoverages returns the coverage
-// the by-hash lookup opens. It runs AFTER the chunks are frozen, as production
-// does: a terminal coverage demotes the per-chunk .bin keys it supersedes.
+// commitDiskTxHashIndex commits the tx-hash window index covering [lo, hi]
+// under its freeze bracket. It must run after the chunks are frozen: a terminal
+// coverage demotes the per-chunk .bin keys it supersedes.
 //
-// An absent index is a real state (a shallow backfill builds none). With txhash
-// in --types every lookup would fail once the legs started, so the open fails
-// here instead, naming the range, the expected dir and the two ways out; without
-// it the open warns and the other three types run.
+// With no index on disk, the open fails when --types includes txhash and warns
+// otherwise.
 func commitDiskTxHashIndex(
 	logger *supportlog.Entry, cat *catalog.Catalog, layout geometry.Layout, lo, hi chunk.ID,
 	txHashRequested bool,
@@ -304,10 +286,8 @@ func commitDiskTxHashIndex(
 }
 
 // diskTxHashCoverage reads the widest window-index coverage on disk spanning
-// [lo, hi] off the {lo:08d}-{hi:08d}.idx filename: a backfill's index usually
-// covers more than the chunks one leg reads. Only the index containing lo is
-// considered; a range straddling two window indexes is rejected because the
-// runner queries one chunk at a time.
+// [lo, hi] off the {lo:08d}-{hi:08d}.idx filenames. Only the index containing
+// lo is searched; a range straddling two window indexes is an error.
 func diskTxHashCoverage(
 	layout geometry.Layout, txLayout geometry.TxHashIndexLayout, lo, hi chunk.ID,
 ) (geometry.TxHashIndexCoverage, bool, error) {
@@ -344,8 +324,7 @@ func diskTxHashCoverage(
 }
 
 // parseIndexFileName decodes a window index's {lo:08d}-{hi:08d}.idx basename,
-// the reverse of geometry.Layout.TxHashIndexFilePath. ok is false for anything
-// else in the dir.
+// the reverse of geometry.Layout.TxHashIndexFilePath.
 func parseIndexFileName(name string) (chunk.ID, chunk.ID, bool) {
 	stem, isIdx := strings.CutSuffix(filepath.Base(name), ".idx")
 	if !isIdx {

@@ -15,14 +15,12 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/store"
 )
 
-// This file holds the four measured request bodies, one per query type. Each
-// models a served endpoint: it takes its own read view, reads through
-// query.ReadView, and returns how many items came back. None touches a store
-// reader that ReadView did not hand over.
+// The four measured request bodies, one per query type. Each takes its own
+// read view, reads through query.ReadView, and returns how many items came
+// back.
 
-// newQueryRequest builds one query type's measured request, sampling whatever
-// corpus it needs first. The corpus build is outside every timer; the returned
-// closure is what a leg measures.
+// newQueryRequest builds one query type's measured request. Its corpus is
+// built first, outside every timer.
 func newQueryRequest(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture, p queryPlan, qtype string,
 ) (queryRequest, error) {
@@ -50,8 +48,7 @@ func newQueryRequest(
 }
 
 // ledgersRequest measures getLedgers' read: one ReadView.ScanLedgers over
-// --ledgers-span ledgers from a random point in the fixture's range. A point
-// read is a span of one; the default span is the SLA shape (getLedgers max=10).
+// --ledgers-span ledgers from a random start in the fixture's range.
 func ledgersRequest(f *queryFixture, p queryPlan) queryRequest {
 	return func(rng *rand.Rand) (cellSample, error) {
 		lo := f.pickStart(rng, p.LedgersSpan)
@@ -72,7 +69,7 @@ func ledgersRequest(f *queryFixture, p queryPlan) queryRequest {
 				if serr != nil {
 					return 0, fmt.Errorf("scan ledgers [%d, %d]: %w", lo, hi, serr)
 				}
-				// Touch the borrowed bytes so the read is not optimized into a seek.
+				// Touch the borrowed bytes.
 				if len(entry.Bytes) == 0 {
 					return 0, fmt.Errorf("ledger %d decoded to zero bytes", entry.Seq)
 				}
@@ -84,10 +81,9 @@ func ledgersRequest(f *queryFixture, p queryPlan) queryRequest {
 }
 
 // txPageRequest measures getTransactions' read: walk --txpage-span ledgers and
-// materialize each one's transactions in apply order, envelopes included,
-// stopping at --txpage-limit the way a page does. Each ledger's transactions
-// are counted inside the loop body because ScanLedgers lends its ledger bytes
-// only until the iterator steps, and every byte field of a view aliases them.
+// materialize each one's transactions, envelopes included, up to
+// --txpage-limit. ScanLedgers lends its ledger bytes until the iterator steps;
+// every byte field of a view aliases them.
 func txPageRequest(f *queryFixture, p queryPlan) queryRequest {
 	return func(rng *rand.Rand) (cellSample, error) {
 		lo := f.pickStart(rng, p.TxPageSpan)
@@ -124,12 +120,10 @@ func txPageRequest(f *queryFixture, p queryPlan) queryRequest {
 	}
 }
 
-// txHashRequest measures getTransaction's read through the served by-hash path,
-// adapters.TransactionReader: hot tx-hash indexes, then the cold window indexes,
-// each candidate verified against its ledger and the transaction's bytes copied
-// out as the endpoint does. The view hands over each index gated to the
-// servable range and opens a cold index on its first probe. The reader is
-// stateless, so one serves every request of a leg.
+// txHashRequest measures getTransaction's read through
+// adapters.TransactionReader: hot tx-hash indexes, then the cold window
+// indexes, each candidate verified against its ledger. The reader is stateless;
+// one serves every request.
 func txHashRequest(ctx context.Context, f *queryFixture, corpus *txHashCorpus) queryRequest {
 	reader := adapters.NewTransactionReader(f.Passphrase, nil)
 	return func(rng *rand.Rand) (cellSample, error) {
@@ -165,10 +159,8 @@ func txHashRequest(ctx context.Context, f *queryFixture, corpus *txHashCorpus) q
 }
 
 // eventsRequest measures getEvents' read: one page of at most --events-limit
-// events over the fixture's range under a filter set from the corpus. One page,
-// not a drain: a drain folds an unbounded number of pages into one sample. An
-// empty page is still real work, since the engine walks its bounded scan window
-// for a filter matching nothing, so a zero item count is not an error.
+// events over the fixture's range under a filter set from the corpus. An empty
+// page is not an error.
 func eventsRequest(
 	ctx context.Context, f *queryFixture, p queryPlan, corpus *eventFilterCorpus,
 ) queryRequest {
@@ -198,7 +190,7 @@ func eventsRequest(
 }
 
 // pickStart returns a random first ledger for a span-long read inside the
-// fixture's range. A span wider than the range is clamped to the range's start.
+// fixture's range. A span wider than the range returns the range's start.
 func (f *queryFixture) pickStart(rng *rand.Rand, span uint32) uint32 {
 	room := f.LastLedger - f.FirstLedger + 1
 	if span >= room {

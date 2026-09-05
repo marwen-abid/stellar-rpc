@@ -15,8 +15,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
-// defaultHotWarmup is --warmup's default: the unmeasured requests a hot leg
-// dispatches before measuring, since the hot tier's steady state is a warm cache.
+// defaultHotWarmup is --warmup's default.
 const defaultHotWarmup = 20
 
 func newQueryHotCommand() *cobra.Command {
@@ -57,25 +56,25 @@ func newQueryHotCommand() *cobra.Command {
 
 // hotQueryOptions configures one hot read benchmark run.
 type hotQueryOptions struct {
-	// HotRoot is the layout root the hot chunk databases live under. The
-	// database is opened read-write, so the run needs write access to it.
+	// HotRoot is the layout root of the hot chunk databases. The database is
+	// opened read-write.
 	HotRoot string
 
 	// Chunk is the chunk whose hot database is queried.
 	Chunk chunk.ID
 
-	// SampleLedgers caps the sampled ledgers to this many from the chunk's first
-	// (0 = every ledger the database holds), so the corpora stay inside a capped ingest.
+	// SampleLedgers caps the sampled ledgers to this many from the chunk's
+	// first; 0 = every ledger the database holds.
 	SampleLedgers uint32
 
-	// Plan is the validated --types × --target-rps ladder.
+	// Plan is the validated flags.
 	Plan queryPlan
 
 	// OutDir receives the CSV report.
 	OutDir string
 }
 
-// validate checks the flags before runQueryHot touches the filesystem.
+// validate checks the flags.
 func (o hotQueryOptions) validate() error {
 	if o.HotRoot == "" {
 		return errors.New("--hot-dir is required")
@@ -87,7 +86,7 @@ func (o hotQueryOptions) validate() error {
 }
 
 // runQueryHot benchmarks the hot read path: queries against one chunk's hot
-// database under --hot-dir, routed through a read view as a served request is.
+// database under --hot-dir.
 func runQueryHot(ctx context.Context, logger *supportlog.Entry, opts hotQueryOptions) error {
 	if err := opts.validate(); err != nil {
 		return err
@@ -98,18 +97,15 @@ func runQueryHot(ctx context.Context, logger *supportlog.Entry, opts hotQueryOpt
 }
 
 // openHotFixture opens one chunk's hot database and returns the read fixture
-// over it, plus the release that closes the handle and tears the catalog down.
+// over it, plus its release.
 //
-// bench-ingest hot writes its databases under a scratch catalog it discards, so
-// this rebuilds the state they imply: the chunk's hot key runs the ready bracket
-// and its database is opened through OpenReadyWrite, the must-exist open
-// ingestion resumes with, so a missing or gutted database fails here.
-// query.OpenRegistry is the daemon's own sequence, so the fixture cannot drift
-// from startup ordering; nothing is frozen, so only the hot tier can serve.
-//
-// The latest ledger is what the database holds (MaxCommittedSeq), never the
-// chunk's nominal last: a capped ingest stops mid-chunk. --sample-ledgers
-// narrows the sampled range further, clamped to what was ingested.
+// The database has no catalog: bench-ingest hot discards its scratch catalog.
+// The chunk's hot key runs the ready bracket and the database is opened with
+// OpenReadyWrite, the must-exist open; query.OpenRegistry is the daemon's own
+// startup sequence. Nothing is frozen, so only the hot tier can serve. The
+// latest ledger is MaxCommittedSeq, not the chunk's nominal last: a capped
+// ingest stops mid-chunk. --sample-ledgers narrows the sampled range, clamped
+// to what was ingested.
 func openHotFixture(logger *supportlog.Entry, opts hotQueryOptions) (*queryFixture, func(), error) {
 	layout := geometry.NewLayout(opts.HotRoot)
 	cat, releaseCat, err := openScratchCatalog(opts.HotRoot, scratchPrefixQuery, layout, logger)
@@ -150,8 +146,7 @@ func openHotFixture(logger *supportlog.Entry, opts hotQueryOptions) (*queryFixtu
 		releaseCat()
 		return nil, nil, fmt.Errorf("open the read registry over hot chunk %s: %w", opts.Chunk, err)
 	}
-	// Before OpenRegistry the fixture owns db and catalog release; after it
-	// Registry.Close closes every published handle, the database included.
+	// Registry.Close closes every published handle, db included.
 	release := func() {
 		registry.Close()
 		releaseCat()
@@ -159,8 +154,7 @@ func openHotFixture(logger *supportlog.Entry, opts hotQueryOptions) (*queryFixtu
 
 	first := opts.Chunk.FirstLedger()
 	last := committed
-	// Overflow-safe cap: compare against the committed span rather than adding a
-	// flag-supplied count to a ledger sequence.
+	// Compare spans: first+SampleLedgers can wrap.
 	if span := committed - first + 1; opts.SampleLedgers > 0 && opts.SampleLedgers < span {
 		last = first + opts.SampleLedgers - 1
 	}

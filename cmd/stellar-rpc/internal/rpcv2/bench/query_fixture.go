@@ -9,8 +9,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 )
 
-// queryPlan is the validated run: which types, at which arrival rates, how long
-// each leg runs, and the shape of each query.
+// queryPlan is the validated run.
 type queryPlan struct {
 	Types     []string
 	TargetRPS []float64
@@ -25,47 +24,39 @@ type queryPlan struct {
 	Passphrase   string
 	Seed         int64
 
-	// Evict drops the cold artifacts from the OS page cache before each leg's
-	// measured requests. Cold only: a hot leg warms the cache instead.
+	// Evict drops the cold artifacts from the OS page cache before each leg.
+	// Cold only.
 	Evict bool
 }
 
-// queryFixture is the read side of one bench-query run over a dataset a
-// bench-ingest run left on disk: the scratch catalog that makes it servable,
-// the registry holding the hot handles, and the ledger range the corpora may
-// sample from.
-//
-// Every query takes a read view and resolves its tier through ReadView, as a
-// served request does. The cold fixture publishes no hot handle and the hot one
-// freezes no artifact, so a resolve that succeeds proves the intended tier
-// served it.
+// queryFixture is the read side of one bench-query run: the registry over a
+// dataset a bench-ingest run left on disk, and the ledger range the corpora may
+// sample. Every query takes a read view and resolves its tier through
+// ReadView. The cold fixture publishes no hot handle; the hot one freezes no
+// artifact.
 type queryFixture struct {
 	registry *query.Registry
 
 	// Passphrase is the network the dataset's transactions were signed under.
-	// txpage and txhash pair envelopes with it; a wrong one makes every lookup a miss.
 	Passphrase string
 
 	// Chunks is the benchmarked chunk range, ascending.
 	Chunks []chunk.ID
 
-	// FirstLedger and LastLedger bound the ledgers the corpora may sample: the
-	// chunk range for a cold fixture, what the database holds for a hot one.
+	// FirstLedger and LastLedger bound the ledgers the corpora may sample.
 	FirstLedger, LastLedger uint32
 
-	// EvictPaths are the on-disk artifacts a cold leg drops from the page cache.
-	// Empty for a hot fixture: RocksDB's caches cannot be advised from here.
+	// EvictPaths are the files a cold leg drops from the page cache. Empty for
+	// a hot fixture.
 	EvictPaths []string
 }
 
-// view acquires one read view. Every measured query takes its own, as a served
-// request does; the caller MUST Release it.
+// view acquires one read view. The caller must Release it.
 func (f *queryFixture) view() (*query.ReadView, error) {
 	return f.registry.NewReadView()
 }
 
-// verifyServes resolves each benchmarked chunk's ledger store through a read
-// view, so a dataset that cannot be served fails at open with the chunk named.
+// verifyServes resolves each chunk's ledger store through a read view.
 func (f *queryFixture) verifyServes() error {
 	view, err := f.view()
 	if err != nil {
@@ -80,10 +71,8 @@ func (f *queryFixture) verifyServes() error {
 	return nil
 }
 
-// evictColdArtifacts drops the fixture's cold artifacts from the OS page cache
-// before a leg and reports how many files it advised. A missing file is
-// skipped: the list is derived from the layout, so a kind the dataset never
-// produced is a legitimate absence.
+// evictColdArtifacts drops EvictPaths from the OS page cache and returns how
+// many files it advised. A missing file is skipped.
 func (f *queryFixture) evictColdArtifacts() (int, error) {
 	evicted := 0
 	for _, path := range f.EvictPaths {
@@ -98,8 +87,8 @@ func (f *queryFixture) evictColdArtifacts() (int, error) {
 	return evicted, nil
 }
 
-// chunkRange returns the ascending chunk IDs in [start, start+num). The caller's
-// validate() proved start+num-1 stays within maxChunkID.
+// chunkRange returns the ascending chunk IDs in [start, start+num). The caller
+// validated start+num-1 <= maxChunkID.
 func chunkRange(start chunk.ID, num int) []chunk.ID {
 	chunks := make([]chunk.ID, 0, num)
 	for i := range uint32(num) { //nolint:gosec // num >= 1, bounded by validate()

@@ -11,12 +11,11 @@ import (
 )
 
 // minLegSamples is the measured-request count below which a leg's percentiles
-// are reported with a warning: a p99 over fewer samples is one or two requests wide.
+// are reported with a warning.
 const minLegSamples = 100
 
-// runQueryLegs runs every requested type at every requested rate against the
-// fixture. A type's corpus is sampled once, before its first leg, and shared by
-// every rate, so what separates two legs of one type is the rate.
+// runQueryLegs runs every type at every rate. A type's corpus is built once and
+// shared by every rate.
 func runQueryLegs(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture, p queryPlan, sink *csvSink,
 ) error {
@@ -38,9 +37,8 @@ func runQueryLegs(
 }
 
 // runQueryLeg runs one (type, rate) leg: page-cache eviction for a cold run,
-// then p.Warmup unmeasured requests and the measured ones, all dispatched at
-// rps over p.Duration. The seed mixes in the type, so two types read different
-// ledgers and neither inherits the other's warm cache.
+// then p.Warmup unmeasured requests and the measured ones, dispatched at rps
+// over p.Duration. The seed mixes in the type.
 func runQueryLeg(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture, p queryPlan, sink *csvSink,
 	qtype string, rps float64, req queryRequest,
@@ -75,19 +73,14 @@ func runQueryLeg(
 
 // recordLeg files one leg's samples into the report.
 //
-// In the type's own CSV every request lands in total_r<rate>, the scheduled
-// latency the results converter reads, and in service_r<rate>, the same
-// requests' service times; a request carrying a sub-stage lands in a
-// <stage>_r<rate> row too. The converter matches total_r<rate> alone; the side
-// rows give the CSV and the log summary the local splits (store time against
-// client wait, txhash found against miss).
+// The type's CSV: every request lands in total_r<rate> (scheduled latency, the
+// row the results converter reads) and service_r<rate> (service time); a
+// request carrying a stage lands in <stage>_r<rate> too.
 //
-// driver.csv gets the leg's four driver rows. <qtype>_r<rate> is the leg wall,
-// which runs to the last completion and so carries the drain tail. _millirps is
-// the answered requests over the window the leg offered, times 1000 as an
-// integer. _lag holds one sample per measured position, shed positions
-// included: how far behind schedule the dispatcher ran. _shed is written for
-// every leg, so a leg that shed nothing reports a zero.
+// driver.csv: <qtype>_r<rate> is the leg wall, to the last completion;
+// _millirps is answered requests over the offered window, times 1000; _lag has
+// one sample per measured position, shed included; _shed is written for every
+// leg.
 func recordLeg(sink *csvSink, qtype string, rps float64, res legResult) {
 	total := queryTotalRow(rps)
 	service := queryServiceRow(rps)
@@ -109,9 +102,8 @@ func recordLeg(sink *csvSink, qtype string, rps float64, res legResult) {
 	sink.observe(fileDriver, queryDriverLegRow(qtype, rps, driverLegShedSuffix), 0, res.shed)
 }
 
-// achievedMilliRPS is the rate answered requests were served at over the offered
-// window, scaled by milliPerUnit and carried as a duration so it fits the CSV's
-// duration columns. No offered window reports zero.
+// achievedMilliRPS is answered/offered in requests per second, scaled by
+// milliPerUnit and carried as a Duration. No offered window reports zero.
 func achievedMilliRPS(answered int, offered time.Duration) time.Duration {
 	if offered <= 0 {
 		return 0
@@ -119,14 +111,13 @@ func achievedMilliRPS(answered int, offered time.Duration) time.Duration {
 	return time.Duration(math.Round(float64(answered) / offered.Seconds() * milliPerUnit))
 }
 
-// runQueryBench is the body both bench-query subcommands share: prepare --out,
-// open the tier's fixture (timing the open into driver.csv), run the legs, and
-// report. A failed run still writes the partial report and the peak RSS.
+// runQueryBench is the body both subcommands share: prepare --out, open the
+// fixture (timed into driver.csv), run the legs, report. A failed run still
+// writes the partial report and the peak RSS.
 func runQueryBench(
 	ctx context.Context, logger *supportlog.Entry, p queryPlan, outDir string,
 	open func() (*queryFixture, func(), error),
 ) error {
-	// Surface an unwritable --out before opening the dataset.
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("create --out dir %s: %w", outDir, err)
 	}
@@ -142,8 +133,7 @@ func runQueryBench(
 	logger.Infof("serving ledgers [%d, %d] over %d chunk(s)", f.FirstLedger, f.LastLedger, len(f.Chunks))
 
 	err = runQueryLegs(ctx, logger, f, p, sink)
-	// VmHWM never decreases, so it is read before the error check and a failed
-	// run's partial CSV still gets the row.
+	// VmHWM never decreases; a failed run still gets the row.
 	recordPeakRSS(logger, sink, readPeakRSS)
 	if err != nil {
 		writePartialCSVs(logger, sink, outDir)

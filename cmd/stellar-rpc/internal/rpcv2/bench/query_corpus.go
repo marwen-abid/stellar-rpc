@@ -20,49 +20,39 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 )
 
-// This file builds the corpora the per-type bodies draw their work from. Every
-// read here happens once, before any measurement, and is never timed.
+// The corpora the request bodies draw their work from. Built once, before
+// measurement; never timed.
 
-// The tx-hash sampler's rule: read randomly chosen ledgers, take at most
-// corpusMaxHashesPerLedger hashes from each, and stop once the pool holds
-// corpusTargetHashes of them or the read cap runs out.
-//
-// The per-ledger cap spreads the pool over ledgers: a lookup reads the ledger
-// the hash landed in, so a pool drawn from one ledger measures a warm read of
-// one decompressed blob, not a served by-hash mix. A dataset dense enough to
-// fill the pool covers corpusTargetHashes/corpusMaxHashesPerLedger ledgers. The
-// read cap ends the sample on a dataset too sparse to reach the target at all.
+// The tx-hash sampler reads randomly chosen ledgers, takes at most
+// corpusMaxHashesPerLedger hashes from each, and stops once the pool holds
+// corpusTargetHashes or corpusMaxLedgerReads reads are spent.
 const (
 	corpusTargetHashes       = 512
 	corpusMaxLedgerReads     = 512
 	corpusMaxHashesPerLedger = 16
 )
 
-// eventScanCap bounds how many stored events the filter builder reads for the
-// chunk's busiest contracts; a full chunk scan would dominate the run's wall.
+// eventScanCap bounds how many stored events the filter builder reads.
 const eventScanCap = 20_000
 
-// eventFilterSets is how many filter sets the events corpus offers, including
-// the unfiltered one.
+// eventFilterSets is how many filter sets the events corpus offers, the
+// unfiltered one included.
 const eventFilterSets = 4
 
 // errNoTransactions means the sampled ledgers carried no transactions.
 var errNoTransactions = errors.New("the sampled ledgers carry no transactions")
 
-// txHashCorpus is the by-hash benchmark's work: a pool of hashes that really
-// landed in the fixture's ledger range, and the fraction of lookups that should
-// instead ask for a hash that never landed.
-//
-// A hit stops at the first index that knows the hash; a miss probes every hot
-// index and then every cold window index, so a hit-only corpus reports the
-// cheap half of what getTransaction serves.
+// txHashCorpus is the by-hash benchmark's work: hashes that landed in the
+// fixture's ledger range, and the fraction of lookups that ask for a hash that
+// never landed. A hit stops at the first index that knows the hash; a miss
+// probes every hot index and then every cold window index.
 type txHashCorpus struct {
 	hashes       [][32]byte
 	missFraction float64
 }
 
 // pick returns one hash to look up and whether it is expected to be found. A
-// miss is 32 random bytes: what matters is that no index holds it.
+// miss is 32 random bytes.
 func (c *txHashCorpus) pick(rng *rand.Rand) ([32]byte, bool) {
 	if c.missFraction > 0 && rng.Float64() < c.missFraction {
 		var h [32]byte
@@ -75,10 +65,7 @@ func (c *txHashCorpus) pick(rng *rand.Rand) ([32]byte, bool) {
 }
 
 // buildTxHashCorpus samples transaction hashes from the fixture's ledger range
-// and checks that one of them resolves before any leg runs. Resolving pairs each
-// TxSet envelope to its result by hashing the envelope under the passphrase;
-// with the wrong one nothing pairs and the benchmark would publish the failed
-// path's latency under the hit path's name.
+// and checks that one of them resolves under the passphrase.
 func buildTxHashCorpus(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture, missFraction float64, seed int64,
 ) (*txHashCorpus, error) {
@@ -107,9 +94,8 @@ func buildTxHashCorpus(
 	return &txHashCorpus{hashes: s.hashes, missFraction: missFraction}, nil
 }
 
-// txHashSampler draws transaction hashes from a fixture's ledgers and records
-// which ledgers they came from. It reads each sequence at most once, so a ledger
-// contributes at most corpusMaxHashesPerLedger hashes.
+// txHashSampler draws transaction hashes from a fixture's ledgers. It reads
+// each sequence at most once.
 type txHashSampler struct {
 	rng *rand.Rand
 
@@ -117,7 +103,7 @@ type txHashSampler struct {
 	hashes [][32]byte
 
 	// ledgers lists every ledger that contributed a hash, in sample order; read
-	// holds every sequence already drawn, including ones with no stored ledger.
+	// holds every sequence drawn, including ones with no stored ledger.
 	ledgers []uint32
 	read    map[uint32]struct{}
 }
@@ -126,18 +112,16 @@ func newTxHashSampler(rng *rand.Rand) *txHashSampler {
 	return &txHashSampler{rng: rng, read: map[uint32]struct{}{}}
 }
 
-// first returns the pool's first hash and the ledger it came from; sampleChunk
-// appends to both slices in the same step. The pool must not be empty.
+// first returns the pool's first hash and the ledger it came from. The pool
+// must not be empty.
 func (s *txHashSampler) first() ([32]byte, uint32) {
 	return s.hashes[0], s.ledgers[0]
 }
 
-// sampleChunk reads randomly chosen ledgers of chunk c within the fixture's
-// range and adds a random subset of each one's hashes to the pool, until the
-// pool reaches corpusTargetHashes or the read cap runs out. A sequence with no
+// sampleChunk reads randomly chosen ledgers of chunk c within [first, last] and
+// adds a random subset of each one's hashes to the pool. A sequence with no
 // stored ledger is skipped: a capped hot ingest leaves the chunk's tail empty.
-// ExtractLedgerTxParts derives the hashes without a passphrase, which is what
-// makes them usable to check the passphrase later.
+// ExtractLedgerTxParts derives the hashes without a passphrase.
 func (s *txHashSampler) sampleChunk(view *query.ReadView, c chunk.ID, first, last uint32) error {
 	lo := max(c.FirstLedger(), first)
 	hi := min(c.LastLedger(), last)
@@ -156,8 +140,8 @@ func (s *txHashSampler) sampleChunk(view *query.ReadView, c chunk.ID, first, las
 			continue
 		}
 		s.read[seq] = struct{}{}
-		// The ledger bytes are on loan inside the callback; the picked hashes are
-		// value arrays and outlive the loan.
+		// The ledger bytes are on loan inside the callback; the hashes are value
+		// arrays.
 		var picked [][32]byte
 		err := reader.WithLedger(seq, func(raw []byte) error {
 			parts, err := sdkingest.ExtractLedgerTxParts(xdr.LedgerCloseMetaView(raw))
@@ -182,9 +166,8 @@ func (s *txHashSampler) sampleChunk(view *query.ReadView, c chunk.ID, first, las
 	return nil
 }
 
-// logCoverage reports how many hashes the pool holds, how many ledgers they came
-// from, and the range those span. A pool from one ledger is legitimate on a
-// dataset that holds one, and warned: every found lookup then reads that ledger.
+// logCoverage logs the pool's size and ledger span, and warns when one ledger
+// supplied every hash.
 func (s *txHashSampler) logCoverage(logger *supportlog.Entry, missFraction float64) {
 	logger.Infof("txhash corpus: %d hashes over %d ledgers spanning %d..%d, miss fraction %.2f",
 		len(s.hashes), len(s.ledgers), slices.Min(s.ledgers), slices.Max(s.ledgers), missFraction)
@@ -194,8 +177,8 @@ func (s *txHashSampler) logCoverage(logger *supportlog.Entry, missFraction float
 	}
 }
 
-// sampleHashesFromLedger returns at most corpusMaxHashesPerLedger of the
-// transactions' hashes, drawn uniformly without replacement.
+// sampleHashesFromLedger returns at most corpusMaxHashesPerLedger hashes, drawn
+// without replacement.
 func sampleHashesFromLedger(rng *rand.Rand, parts []sdkingest.LedgerTxParts) [][32]byte {
 	take := min(len(parts), corpusMaxHashesPerLedger)
 	out := make([][32]byte, 0, take)
@@ -205,13 +188,9 @@ func sampleHashesFromLedger(rng *rand.Rand, parts []sdkingest.LedgerTxParts) [][
 	return out
 }
 
-// verifySampledHashResolves checks a hash the sampler read out of ledger seq
-// two ways, in the order that tells the operator what to fix. Envelope pairing
-// against that one ledger comes first: it is the only step the passphrase
-// feeds, so a failure names --network-passphrase and nothing else. The served
-// by-hash probe comes second: it can fail for reasons the passphrase has no
-// part in (an index never committed, an .idx that will not open), so its error
-// is reported as the probe failure it is.
+// verifySampledHashResolves checks a sampled hash two ways: envelope pairing
+// against its own ledger, the only step the passphrase feeds, then the served
+// by-hash probe.
 func verifySampledHashResolves(
 	ctx context.Context, view *query.ReadView, f *queryFixture, hash [32]byte, seq uint32,
 ) error {
@@ -226,10 +205,9 @@ func verifySampledHashResolves(
 	return nil
 }
 
-// verifyEnvelopePairing re-reads ledger seq and materializes hash out of it
-// with the configured passphrase. The hash came from that ledger's own results
-// and meta, so the pairing is the only thing that can go wrong, and a failure
-// reports the passphrase.
+// verifyEnvelopePairing re-reads ledger seq and pairs hash with its envelope
+// under passphrase. The hash came from that ledger, so a failure means the
+// passphrase is wrong for the dataset.
 func verifyEnvelopePairing(view *query.ReadView, passphrase string, hash [32]byte, seq uint32) error {
 	reader, err := view.Ledgers(chunk.IDFromLedger(seq))
 	if err != nil {
@@ -257,22 +235,20 @@ func verifyEnvelopePairing(view *query.ReadView, passphrase string, hash [32]byt
 	return nil
 }
 
-// eventFilterCorpus is the events benchmark's work: a handful of filter sets,
-// one of which is unfiltered. An unfiltered page streams events in order while a
-// filtered one intersects term postings first; rotating a fixed set keeps both
-// shapes in the number without turning it into a selectivity sweep.
+// eventFilterCorpus is the events benchmark's work: filter sets, one of them
+// unfiltered.
 type eventFilterCorpus struct {
 	sets [][]event.Filter
 }
 
-// pick returns one filter set to page with. A nil set is the unfiltered read.
+// pick returns one filter set. nil is the unfiltered read.
 func (c *eventFilterCorpus) pick(rng *rand.Rand) []event.Filter {
 	return c.sets[rng.IntN(len(c.sets))]
 }
 
-// buildEventFilterCorpus derives filter sets from the events stored in the
-// fixture's chunks: the busiest contracts, and the busiest contract narrowed by
-// its most common first topic. The unfiltered set is always included.
+// buildEventFilterCorpus derives filter sets from the stored events: the
+// unfiltered set, the busiest contracts, and the busiest contract narrowed by
+// its most common first topic.
 func buildEventFilterCorpus(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture,
 ) (*eventFilterCorpus, error) {
@@ -306,8 +282,7 @@ func buildEventFilterCorpus(
 	return &eventFilterCorpus{sets: sets}, nil
 }
 
-// validateFilterSets runs the engine's own filter check over every set, so a
-// malformed filter fails at build time rather than on every measured page.
+// validateFilterSets runs event.ValidateFilters over every set.
 func validateFilterSets(sets [][]event.Filter) error {
 	for _, set := range sets {
 		if err := event.ValidateFilters(set); err != nil {
@@ -319,8 +294,7 @@ func validateFilterSets(sets [][]event.Filter) error {
 
 // scanEventTerms reads up to eventScanCap stored events across the chunks and
 // returns the contract IDs and first-topic values by descending frequency, as
-// the store's canonical term bytes, so a filter built from them keys the same
-// terms the events were indexed under.
+// the store's canonical term bytes.
 func scanEventTerms(
 	ctx context.Context, view *query.ReadView, chunks []chunk.ID,
 ) ([][]byte, [][]byte, error) {
@@ -331,7 +305,7 @@ func scanEventTerms(
 	for _, c := range chunks {
 		reader, rerr := view.Events(c)
 		if rerr != nil {
-			// A chunk with no events store still serves the unfiltered set.
+			// A chunk may have no events store.
 			continue
 		}
 		for payload, perr := range reader.All(ctx) {
@@ -361,7 +335,7 @@ func scanEventTerms(
 }
 
 // eventTerms reads one stored event's contract ID and first topic through the
-// XDR views, as the events indexer derives its terms. Either is nil when absent.
+// XDR views, as the events indexer does. Either is nil when absent.
 func eventTerms(eventBytes []byte) ([]byte, []byte, error) {
 	var cid []byte
 	ev := xdr.ContractEventView(eventBytes)
@@ -408,13 +382,12 @@ func eventTerms(eventBytes []byte) ([]byte, []byte, error) {
 	if len(all) == 0 {
 		return cid, nil, nil
 	}
-	// All trims each element to size, so the view's bytes are the topic's raw
-	// XDR, the form the index keys on.
+	// Each element of All is the topic's raw XDR, the form the index keys on.
 	return cid, slices.Clone([]byte(all[0])), nil
 }
 
-// byDescendingCount returns the keys of counts, most frequent first, ties broken
-// by value so a run is reproducible.
+// byDescendingCount returns the keys of counts, most frequent first, ties
+// broken by value.
 func byDescendingCount(counts map[string]int) [][]byte {
 	keys := make([]string, 0, len(counts))
 	for k := range counts {
