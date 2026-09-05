@@ -222,14 +222,12 @@ func TestLaunchPacedRequestChargesLateDispatch(t *testing.T) {
 		return timed("", func() (int, error) { return 1, nil })
 	}
 
-	collector := &legCollector{}
-	slots := make(chan struct{}, 1)
-	var wg sync.WaitGroup
+	leg := newPacedLeg(req, 1)
 	due := time.Now().Add(-late)
-	launchPacedRequest(&wg, slots, collector, req, legRNG(1, 0, 1), due, true)
-	wg.Wait()
+	leg.launch(legRNG(1, 0, 1), due, true)
+	leg.wg.Wait()
 
-	res := collector.result(due)
+	res := leg.result(due)
 	require.Len(t, res.samples, 1)
 	require.Len(t, res.lags, 1)
 	assert.GreaterOrEqual(t, res.samples[0].scheduled, late, "the client waited from the due time")

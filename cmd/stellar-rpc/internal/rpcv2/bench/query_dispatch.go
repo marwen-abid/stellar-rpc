@@ -59,67 +59,65 @@ type legResult struct {
 	errs int
 }
 
-// legCollector gathers a leg's outcome. Safe for concurrent use.
-type legCollector struct {
-	mu         sync.Mutex
-	samples    []cellSample
+// pacedLeg is one leg's dispatch state.
+type pacedLeg struct {
+	req   queryRequest
+	wg    sync.WaitGroup
+	slots chan struct{}
+
+	// Written by the dispatch goroutine only.
 	lags       []time.Duration
-	lastDone   time.Time
 	dispatched int
 	shed       int
-	errs       int
+
+	// Written by the request goroutines, under mu.
+	mu       sync.Mutex
+	samples  []cellSample
+	lastDone time.Time
+	errs     int
 }
 
-func (c *legCollector) recordLag(lag time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.lags = append(c.lags, lag)
-}
-
-func (c *legCollector) recordDispatch() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.dispatched++
-}
-
-func (c *legCollector) recordShed() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.shed++
-}
-
-func (c *legCollector) recordSample(s cellSample, done time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.samples = append(c.samples, s)
-	if done.After(c.lastDone) {
-		c.lastDone = done
+func newPacedLeg(req queryRequest, measured int) *pacedLeg {
+	return &pacedLeg{
+		req:     req,
+		slots:   make(chan struct{}, maxInFlight),
+		lags:    make([]time.Duration, 0, measured),
+		samples: make([]cellSample, 0, measured),
 	}
 }
 
-func (c *legCollector) recordError(done time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.errs++
-	if done.After(c.lastDone) {
-		c.lastDone = done
+func (l *pacedLeg) recordSample(s cellSample, done time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.samples = append(l.samples, s)
+	if done.After(l.lastDone) {
+		l.lastDone = done
 	}
 }
 
-// result assembles the leg's outcome. wall is measured from firstDue and is
-// zero when nothing completed.
-func (c *legCollector) result(firstDue time.Time) legResult {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (l *pacedLeg) recordError(done time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.errs++
+	if done.After(l.lastDone) {
+		l.lastDone = done
+	}
+}
+
+// result assembles the leg's outcome once every request has returned. wall is
+// measured from firstDue and is zero when nothing completed.
+func (l *pacedLeg) result(firstDue time.Time) legResult {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	out := legResult{
-		samples:    c.samples,
-		lags:       c.lags,
-		dispatched: c.dispatched,
-		shed:       c.shed,
-		errs:       c.errs,
+		samples:    l.samples,
+		lags:       l.lags,
+		dispatched: l.dispatched,
+		shed:       l.shed,
+		errs:       l.errs,
 	}
-	if !c.lastDone.IsZero() {
-		out.wall = c.lastDone.Sub(firstDue)
+	if !l.lastDone.IsZero() {
+		out.wall = l.lastDone.Sub(firstDue)
 	}
 	return out
 }
@@ -145,59 +143,54 @@ func runPacedLeg(
 	interval := time.Duration(float64(time.Second) / rps)
 	schedule := newPaceSchedule(interval, 0)
 
-	collector := &legCollector{}
-	slots := make(chan struct{}, maxInFlight)
-	var wg sync.WaitGroup
+	leg := newPacedLeg(req, measured)
 	for pos := range warmup + measured {
 		if err := ctx.Err(); err != nil {
-			wg.Wait()
+			leg.wg.Wait()
 			return legResult{}, err
 		}
 		due := schedule.dueForPos(pos)
 		if err := contextSleep(ctx, due.Sub(schedule.clock())); err != nil {
-			wg.Wait()
+			leg.wg.Wait()
 			return legResult{}, err
 		}
-		launchPacedRequest(&wg, slots, collector, req, legRNG(seed, pos, rps), due, pos >= warmup)
+		leg.launch(legRNG(seed, pos, rps), due, pos >= warmup)
 	}
-	wg.Wait()
-	res := collector.result(schedule.dueForPos(warmup))
+	leg.wg.Wait()
+	res := leg.result(schedule.dueForPos(warmup))
 	res.offered = time.Duration(measured) * interval
 	return res, nil
 }
 
-// launchPacedRequest runs one request on its own goroutine when a slot is free
-// and sheds it otherwise. A measured position records its lag whether or not
-// it is shed; a warmup position records nothing.
-func launchPacedRequest(
-	wg *sync.WaitGroup, slots chan struct{}, collector *legCollector,
-	req queryRequest, rng *rand.Rand, due time.Time, measured bool,
-) {
+// launch runs one request on its own goroutine when a slot is free and sheds
+// it otherwise. A measured position records its lag whether or not it is shed;
+// a warmup position records nothing. Called from the dispatch goroutine only.
+func (l *pacedLeg) launch(rng *rand.Rand, due time.Time, measured bool) {
 	if measured {
-		collector.recordLag(max(time.Since(due), 0))
+		l.lags = append(l.lags, max(time.Since(due), 0))
 	}
 	select {
-	case slots <- struct{}{}:
+	case l.slots <- struct{}{}:
 	default:
 		if measured {
-			collector.recordShed()
+			l.shed++
 		}
 		return
 	}
 	if measured {
-		collector.recordDispatch()
+		l.dispatched++
 	}
-	wg.Go(func() {
-		defer func() { <-slots }()
-		s, err := req(rng)
+	l.wg.Go(func() {
+		defer func() { <-l.slots }()
+		s, err := l.req(rng)
 		done := time.Now()
 		switch {
 		case !measured:
 		case err != nil:
-			collector.recordError(done)
+			l.recordError(done)
 		default:
 			s.scheduled = done.Sub(due)
-			collector.recordSample(s, done)
+			l.recordSample(s, done)
 		}
 	})
 }
