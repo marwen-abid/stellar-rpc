@@ -206,8 +206,8 @@ func verifySampledHashResolves(
 }
 
 // verifyEnvelopePairing re-reads ledger seq and pairs hash with its envelope
-// under passphrase. The hash came from that ledger, so a failure means the
-// passphrase is wrong for the dataset.
+// under passphrase. The hash match is passphrase-independent; only the envelope
+// pairing needs the passphrase, and it reports a mismatch as an error.
 func verifyEnvelopePairing(view *query.ReadView, passphrase string, hash [32]byte, seq uint32) error {
 	reader, err := view.Ledgers(chunk.IDFromLedger(seq))
 	if err != nil {
@@ -224,13 +224,13 @@ func verifyEnvelopePairing(view *query.ReadView, passphrase string, hash [32]byt
 	}
 	if err := pairErr; err != nil {
 		return fmt.Errorf(
-			"transaction %x does not pair with an envelope in ledger %d, the ledger it was sampled from: "+
-				"--network-passphrase=%q is wrong for this dataset (%w)", hash, seq, passphrase, err)
+			"transaction %x does not pair with an envelope in ledger %d, the ledger it was sampled from, "+
+				"under --network-passphrase=%q: %w", hash, seq, passphrase, err)
 	}
 	if !found {
 		return fmt.Errorf(
 			"transaction %x is not in ledger %d, the ledger it was sampled from: "+
-				"--network-passphrase=%q is wrong for this dataset", hash, seq, passphrase)
+				"the ledger bytes changed between the two reads", hash, seq)
 	}
 	return nil
 }
