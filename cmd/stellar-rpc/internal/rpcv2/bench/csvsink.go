@@ -583,18 +583,19 @@ func (s *csvSink) logSummary(logger *supportlog.Entry) {
 // logRow logs one aggregated row. Driver rows whose duration columns carry a
 // count (peak RSS bytes, milli-rps, shed) log that number.
 func logRow(logger *supportlog.Entry, fileName string, r row) {
-	switch {
-	case fileName != fileDriver:
-	case r.name == driverPeakRSS:
-		logger.Infof("%-10s %-12s n=%-7d bytes=%d", fileName, r.name, r.n, r.total.Nanoseconds())
-		return
-	case strings.HasSuffix(r.name, driverLegRPSSuffix):
-		logger.Infof("%-10s %-12s n=%-7d rps=%.3f", fileName, r.name, r.n,
-			float64(r.total.Nanoseconds())/milliPerUnit)
-		return
-	case strings.HasSuffix(r.name, driverLegShedSuffix):
-		logger.Infof("%-10s %-12s n=%-7d shed=%d", fileName, r.name, r.n, r.items)
-		return
+	if fileName == fileDriver {
+		switch {
+		case r.name == driverPeakRSS:
+			logger.Infof("%-10s %-12s n=%-7d bytes=%d", fileName, r.name, r.n, r.total.Nanoseconds())
+			return
+		case strings.HasSuffix(r.name, driverLegRPSSuffix):
+			logger.Infof("%-10s %-12s n=%-7d rps=%.3f", fileName, r.name, r.n,
+				float64(r.total.Nanoseconds())/milliPerUnit)
+			return
+		case strings.HasSuffix(r.name, driverLegShedSuffix):
+			logger.Infof("%-10s %-12s n=%-7d shed=%d", fileName, r.name, r.n, r.items)
+			return
+		}
 	}
 	logger.Infof("%-10s %-12s n=%-7d items=%-9d total=%-12s p50=%-10s p90=%-10s p99=%-10s max=%s",
 		fileName, r.name, r.n, r.items,
