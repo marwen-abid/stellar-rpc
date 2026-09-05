@@ -19,6 +19,7 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
 )
 
 func TestCorpusSpansManyLedgersOnADenseDataset(t *testing.T) {
@@ -241,7 +242,9 @@ func uniqueHashes(hashes [][32]byte) map[[32]byte]struct{} {
 // each into a hot database and opens the query fixture over it.
 func openDenseHotFixture(t *testing.T, numLedgers uint32, txPerLedger int) (*queryFixture, func()) {
 	t.Helper()
-	packDir := writeDenseSourcePack(t, t.TempDir(), chunk.ID(0), numLedgers, txPerLedger)
+	packDir := writeLedgerPack(t, t.TempDir(), chunk.ID(0), numLedgers, func(seq uint32) []byte {
+		return rpcv2test.MultiTxLCMBytes(t, seq, txPerLedger)
+	})
 	return openHotFixtureOverPack(t, packDir, numLedgers)
 }
 

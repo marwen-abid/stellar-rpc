@@ -52,18 +52,6 @@ func writeSourcePack(t *testing.T, root string, chunkID chunk.ID, numLedgers uin
 	return packRoot, txLedgers
 }
 
-// writeDenseSourcePack writes a source pack for chunkID under root/ledgers with
-// numLedgers ledgers of txPerLedger transactions each. It returns the ledgers
-// tree root.
-func writeDenseSourcePack(
-	t *testing.T, root string, chunkID chunk.ID, numLedgers uint32, txPerLedger int,
-) string {
-	t.Helper()
-	return writeLedgerPack(t, root, chunkID, numLedgers, func(seq uint32) []byte {
-		return rpcv2test.MultiTxLCMBytes(t, seq, txPerLedger)
-	})
-}
-
 // writeLedgerPack writes numLedgers ledgers from chunkID's first sequence into
 // a source pack under root/ledgers, taking each ledger's bytes from build. It
 // returns the ledgers tree root.
