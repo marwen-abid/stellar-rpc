@@ -4,9 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stellar/go-stellar-sdk/network"
 )
 
 func validQueryFlags() queryFlags {
