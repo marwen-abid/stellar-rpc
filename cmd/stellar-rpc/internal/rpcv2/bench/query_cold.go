@@ -123,7 +123,7 @@ func runQueryCold(ctx context.Context, logger *supportlog.Entry, opts coldQueryO
 // chunk in the range runs the freeze bracket for each kind on disk; the tx-hash
 // window index is committed under its own bracket, its coverage read from the
 // .idx filename; the chunk one past the range gets a "ready" hot key with no
-// handle. LastCompleteChunk is the lowest ready hot chunk minus one, and
+// handle. LastCompleteChunk is the highest ready hot chunk minus one, and
 // NewReadView fails without one; a hot key with no handle resolves to no tier.
 // Retention is full history from the range's first chunk; the latest ledger is
 // the range's last.
