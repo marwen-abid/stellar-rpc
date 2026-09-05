@@ -32,7 +32,8 @@ func TestNewQueryCommand(t *testing.T) {
 }
 
 // TestQueryCommandAcceptsRunnerArgv parses the argv the campaign runner emits
-// through both subcommands. The runner passes --warmup to hot only.
+// through both subcommands. The runner is stellar-experimental/stellar-rpc-benchmarks
+// (runner/internal/plan/plan.go); it passes --warmup to hot only.
 func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 	for _, tc := range []struct {
 		name string
