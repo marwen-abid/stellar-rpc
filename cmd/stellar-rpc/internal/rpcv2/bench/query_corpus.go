@@ -247,8 +247,8 @@ func (c *eventFilterCorpus) pick(rng *rand.Rand) []event.Filter {
 }
 
 // buildEventFilterCorpus derives filter sets from the stored events: the
-// unfiltered set, the busiest contracts, and the busiest contract narrowed by
-// its most common first topic.
+// unfiltered set, the busiest contracts, and the most common (contract, first
+// topic) pair.
 func buildEventFilterCorpus(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture,
 ) (*eventFilterCorpus, error) {
@@ -258,7 +258,7 @@ func buildEventFilterCorpus(
 	}
 	defer view.Release()
 
-	contracts, topics, err := scanEventTerms(ctx, view, f.Chunks)
+	contracts, pairs, err := scanEventTerms(ctx, view, f.Chunks)
 	if err != nil {
 		return nil, err
 	}
@@ -269,16 +269,16 @@ func buildEventFilterCorpus(
 		}
 		sets = append(sets, []event.Filter{{ContractID: cid}})
 	}
-	if len(contracts) > 0 && len(topics) > 0 {
-		f := event.Filter{ContractID: contracts[0]}
-		f.Topics[0] = topics[0]
+	if len(pairs) > 0 {
+		f := event.Filter{ContractID: pairs[0].contract}
+		f.Topics[0] = pairs[0].topic
 		sets = append(sets, []event.Filter{f})
 	}
 	if err := validateFilterSets(sets); err != nil {
 		return nil, err
 	}
-	logger.Infof("events corpus: %d filter sets (%d contracts, %d topic values seen)",
-		len(sets), len(contracts), len(topics))
+	logger.Infof("events corpus: %d filter sets (%d contracts, %d contract-topic pairs seen)",
+		len(sets), len(contracts), len(pairs))
 	return &eventFilterCorpus{sets: sets}, nil
 }
 
@@ -292,14 +292,21 @@ func validateFilterSets(sets [][]event.Filter) error {
 	return nil
 }
 
+// eventTermPair is one event's contract ID and first topic, as the store's
+// canonical term bytes.
+type eventTermPair struct {
+	contract, topic []byte
+}
+
 // scanEventTerms reads up to eventScanCap stored events across the chunks and
-// returns the contract IDs and first-topic values by descending frequency, as
-// the store's canonical term bytes.
+// returns the contract IDs and the (contract, first topic) pairs by descending
+// frequency, as the store's canonical term bytes.
 func scanEventTerms(
 	ctx context.Context, view *query.ReadView, chunks []chunk.ID,
-) ([][]byte, [][]byte, error) {
+) ([][]byte, []eventTermPair, error) {
 	contractCounts := map[string]int{}
-	topicCounts := map[string]int{}
+	pairCounts := map[string]int{}
+	pairTerms := map[string]eventTermPair{}
 	scanned := 0
 
 	for _, c := range chunks {
@@ -319,8 +326,10 @@ func scanEventTerms(
 			if cid != nil {
 				contractCounts[string(cid)]++
 			}
-			if topic0 != nil {
-				topicCounts[string(topic0)]++
+			if cid != nil && topic0 != nil {
+				key := string(cid) + "\x00" + string(topic0)
+				pairCounts[key]++
+				pairTerms[key] = eventTermPair{contract: cid, topic: topic0}
 			}
 			scanned++
 			if scanned >= eventScanCap {
@@ -331,7 +340,12 @@ func scanEventTerms(
 			break
 		}
 	}
-	return byDescendingCount(contractCounts), byDescendingCount(topicCounts), nil
+	pairKeys := byDescendingCount(pairCounts)
+	pairs := make([]eventTermPair, len(pairKeys))
+	for i, k := range pairKeys {
+		pairs[i] = pairTerms[string(k)]
+	}
+	return byDescendingCount(contractCounts), pairs, nil
 }
 
 // eventTerms reads one stored event's contract ID and first topic through the
