@@ -41,28 +41,12 @@ func TestCorpusSpansManyLedgersOnADenseDataset(t *testing.T) {
 	for seq, n := range perLedger {
 		assert.LessOrEqual(t, n, corpusMaxHashesPerLedger, "ledger %d is over the per-ledger cap", seq)
 	}
-	assert.Len(t, perLedger, len(s.ledgers), "ledgers lists exactly the ledgers that contributed")
-	assert.Len(t, uniqueHashes(s.hashes), len(s.hashes), "a hash is sampled at most once")
-}
-
-func TestCorpusPairsEachHashWithItsLedger(t *testing.T) {
-	f, release := openDenseHotFixture(t, 64, 4*corpusMaxHashesPerLedger)
-	defer release()
-
-	view, err := f.view()
-	require.NoError(t, err)
-	defer view.Release()
-
-	s := newTxHashSampler(testRNG())
-	require.NoError(t, s.sampleChunk(view, f.Chunks[0], f.FirstLedger, f.LastLedger))
-	require.NotEmpty(t, s.hashes)
-
-	resolved := hashesPerLedger(t, f, view, s.hashes)
-	seqs := make([]uint32, 0, len(resolved))
-	for seq := range resolved {
+	seqs := make([]uint32, 0, len(perLedger))
+	for seq := range perLedger {
 		seqs = append(seqs, seq)
 	}
 	assert.ElementsMatch(t, s.ledgers, seqs, "the pool's hashes come from the ledgers the sampler listed")
+	assert.Len(t, uniqueHashes(s.hashes), len(s.hashes), "a hash is sampled at most once")
 }
 
 func TestCorpusTakesEveryHashOfALedgerBelowTheCap(t *testing.T) {
