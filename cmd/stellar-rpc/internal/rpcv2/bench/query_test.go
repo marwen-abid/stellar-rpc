@@ -311,16 +311,7 @@ func TestRecordLegAllShed(t *testing.T) {
 // rebuilds it.
 func TestOpenColdFixtureServesFrozenChunks(t *testing.T) {
 	chunkID := chunk.ID(0)
-	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, chunk.LedgersPerChunk)
-	coldRoot := t.TempDir()
-	require.NoError(t, runCold(context.Background(), testLogger(), coldOptions{
-		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
-		StartChunk: chunkID,
-		NumChunks:  1,
-		Workers:    1,
-		ColdRoot:   coldRoot,
-		OutDir:     filepath.Join(t.TempDir(), "csv"),
-	}))
+	coldRoot := ingestColdChunk(t, chunkID)
 
 	f, release, err := openColdFixture(testLogger(), coldQueryOptions{
 		ColdRoot:   coldRoot,
