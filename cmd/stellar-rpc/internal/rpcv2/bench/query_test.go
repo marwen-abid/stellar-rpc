@@ -552,16 +552,20 @@ func TestOpenColdFixtureWithoutTxHashIndex(t *testing.T) {
 		require.NoError(t, err)
 		defer release()
 		assert.Equal(t, []chunk.ID{chunkID}, f.Chunks)
-		assert.Contains(t, warningMessages(warnings), "no tx-hash window index on disk")
+		assert.Contains(t, strings.Join(logMessages(warnings, logrus.WarnLevel), "\n"),
+			"no tx-hash window index on disk")
 	})
 }
 
-func warningMessages(entries []logrus.Entry) string {
-	messages := make([]string, 0, len(entries))
+// logMessages returns the messages of the captured entries logged at level.
+func logMessages(entries []logrus.Entry, level logrus.Level) []string {
+	var messages []string
 	for _, e := range entries {
-		messages = append(messages, e.Message)
+		if e.Level == level {
+			messages = append(messages, e.Message)
+		}
 	}
-	return strings.Join(messages, "\n")
+	return messages
 }
 
 func TestEvictionStateRecordsPlatform(t *testing.T) {

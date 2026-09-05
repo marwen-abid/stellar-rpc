@@ -161,17 +161,13 @@ func buildCorpusCapturingLogs(t *testing.T, f *queryFixture) (string, []string) 
 	require.NoError(t, err)
 
 	var coverage string
-	var warnings []string
-	for _, e := range entries {
-		if e.Level == logrus.WarnLevel {
-			warnings = append(warnings, e.Message)
-		}
-		if strings.HasPrefix(e.Message, "txhash corpus:") {
-			coverage = e.Message
+	for _, m := range logMessages(entries, logrus.InfoLevel) {
+		if strings.HasPrefix(m, "txhash corpus:") {
+			coverage = m
 		}
 	}
 	require.NotEmpty(t, coverage, "the corpus build logs its coverage")
-	return coverage, warnings
+	return coverage, logMessages(entries, logrus.WarnLevel)
 }
 
 func TestVerifySampledHashReportsThePassphrase(t *testing.T) {
