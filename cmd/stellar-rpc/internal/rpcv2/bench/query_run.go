@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"time"
 
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -60,7 +61,7 @@ func runQueryLeg(
 			qtype, formatRPS(rps), measured, minLegSamples)
 	}
 
-	res, err := runPacedLeg(ctx, rps, p.Duration, p.Warmup, p.Seed+int64(len(qtype)), req)
+	res, err := runPacedLeg(ctx, rps, p.Duration, p.Warmup, legSeed(p.Seed, qtype), req)
 	if err != nil {
 		return err
 	}
@@ -69,6 +70,12 @@ func runQueryLeg(
 	}
 	recordLeg(sink, qtype, rps, res)
 	return nil
+}
+
+// legSeed is a leg's seed: the run seed plus the type's index in allQueryTypes.
+// Distinct types get distinct seeds.
+func legSeed(base int64, qtype string) int64 {
+	return base + int64(slices.Index(allQueryTypes, qtype))
 }
 
 // recordLeg files one leg's samples into the report.
