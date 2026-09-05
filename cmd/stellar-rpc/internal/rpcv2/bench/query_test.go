@@ -381,11 +381,14 @@ func TestRunQueryCold(t *testing.T) {
 	driver := readCSV(t, filepath.Join(csvDir, "driver.csv"))
 	require.Contains(t, driver, "open")
 	assert.EqualValues(t, 1, driver["open"]["n_items"], "one chunk opened")
-	// Off Linux the eviction pass is a no-op and the sink drops its zero-duration
-	// samples; only the row's presence and item count hold on every platform.
+	if !evictSupported {
+		// The pass is a no-op here; the sink drops zero-duration samples, so the
+		// row may be absent.
+		return
+	}
 	require.Contains(t, driver, "evict", "a cold leg evicts before it measures")
-	assert.LessOrEqual(t, driver["evict"]["n"], int64(len(plan.Types)*len(plan.TargetRPS)),
-		"at most one eviction pass per leg")
+	assert.EqualValues(t, len(plan.Types)*len(plan.TargetRPS), driver["evict"]["n"],
+		"one eviction pass per leg")
 	assert.Positive(t, driver["evict"]["n_items"], "the eviction pass named some artifacts")
 }
 
