@@ -257,11 +257,28 @@ func EventsLCMBytes(t *testing.T, seq uint32, evs ...xdr.ContractEvent) []byte {
 // account gives each call a distinct, valid pubnet transaction hash.
 func EventsLCMBytesAt(t *testing.T, seq uint32, closeTimeUnix int64, evs ...xdr.ContractEvent) []byte {
 	t.Helper()
-	meta := xdr.TransactionMeta{
-		V:  4,
-		V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{{Events: evs}}},
-	}
+	envelope, processing := successfulTx(t, evs)
+	return V2LCMBytes(t, seq, closeTimeUnix, []xdr.TransactionEnvelope{envelope}, []xdr.TransactionResultMetaV1{processing})
+}
 
+// MultiTxLCMBytes returns the marshaled bytes of a LedgerCloseMeta (V2) for
+// ledger seq carrying txCount successful transactions without events. Each
+// transaction's random source account gives it a distinct, valid pubnet hash.
+func MultiTxLCMBytes(t *testing.T, seq uint32, txCount int) []byte {
+	t.Helper()
+	envelopes := make([]xdr.TransactionEnvelope, txCount)
+	processing := make([]xdr.TransactionResultMetaV1, txCount)
+	for i := range txCount {
+		envelopes[i], processing[i] = successfulTx(t, nil)
+	}
+	return V2LCMBytes(t, seq, 0, envelopes, processing)
+}
+
+// successfulTx returns one successful Soroban transaction with a random source
+// account and its result pair: the envelope's pubnet hash, one operation whose
+// meta carries evs, and an empty op-result list.
+func successfulTx(t *testing.T, evs []xdr.ContractEvent) (xdr.TransactionEnvelope, xdr.TransactionResultMetaV1) {
+	t.Helper()
 	envelope := xdr.TransactionEnvelope{
 		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
 		V1: &xdr.TransactionV1Envelope{
@@ -278,8 +295,11 @@ func EventsLCMBytesAt(t *testing.T, seq uint32, closeTimeUnix int64, evs ...xdr.
 	require.NoError(t, err)
 
 	opResults := []xdr.OperationResult{}
-	processing := []xdr.TransactionResultMetaV1{{
-		TxApplyProcessing: meta,
+	processing := xdr.TransactionResultMetaV1{
+		TxApplyProcessing: xdr.TransactionMeta{
+			V:  4,
+			V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{{Events: evs}}},
+		},
 		Result: xdr.TransactionResultPair{
 			TransactionHash: hash,
 			Result: xdr.TransactionResult{
@@ -290,8 +310,8 @@ func EventsLCMBytesAt(t *testing.T, seq uint32, closeTimeUnix int64, evs ...xdr.
 				},
 			},
 		},
-	}}
-	return V2LCMBytes(t, seq, closeTimeUnix, []xdr.TransactionEnvelope{envelope}, processing)
+	}
+	return envelope, processing
 }
 
 // FeeTxLCMBytes returns the marshaled bytes of a single-transaction

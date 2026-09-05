@@ -15,10 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
-	"github.com/stellar/go-stellar-sdk/keypair"
-	"github.com/stellar/go-stellar-sdk/network"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
-	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
@@ -63,7 +60,7 @@ func writeDenseSourcePack(
 ) string {
 	t.Helper()
 	return writeLedgerPack(t, root, chunkID, numLedgers, func(seq uint32) []byte {
-		return multiTxLCMBytes(t, seq, txPerLedger)
+		return rpcv2test.MultiTxLCMBytes(t, seq, txPerLedger)
 	})
 }
 
@@ -88,47 +85,6 @@ func writeLedgerPack(
 	}
 	require.NoError(t, w.Commit())
 	return layout.LedgersRoot()
-}
-
-// multiTxLCMBytes returns the marshaled LedgerCloseMeta V2 for ledger seq with
-// txCount transactions. Each transaction has a random source account and a
-// result pair keyed by its envelope hash under the pubnet passphrase.
-func multiTxLCMBytes(t *testing.T, seq uint32, txCount int) []byte {
-	t.Helper()
-	envelopes := make([]xdr.TransactionEnvelope, txCount)
-	processing := make([]xdr.TransactionResultMetaV1, txCount)
-	for i := range txCount {
-		envelopes[i] = xdr.TransactionEnvelope{
-			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
-			V1: &xdr.TransactionV1Envelope{
-				Tx: xdr.Transaction{
-					SourceAccount: xdr.MustMuxedAddress(keypair.MustRandom().Address()),
-					Ext:           xdr.TransactionExt{V: 1, SorobanData: &xdr.SorobanTransactionData{}},
-				},
-			},
-		}
-		hash, err := network.HashTransactionInEnvelope(envelopes[i], network.PublicNetworkPassphrase)
-		require.NoError(t, err)
-
-		opResults := []xdr.OperationResult{}
-		processing[i] = xdr.TransactionResultMetaV1{
-			TxApplyProcessing: xdr.TransactionMeta{
-				V:  4,
-				V4: &xdr.TransactionMetaV4{Operations: []xdr.OperationMetaV2{{}}},
-			},
-			Result: xdr.TransactionResultPair{
-				TransactionHash: hash,
-				Result: xdr.TransactionResult{
-					FeeCharged: 100,
-					Result: xdr.TransactionResultResult{
-						Code:    xdr.TransactionResultCodeTxSuccess,
-						Results: &opResults,
-					},
-				},
-			},
-		}
-	}
-	return rpcv2test.V2LCMBytes(t, seq, 0, envelopes, processing)
 }
 
 // readCSV parses one report file into rows keyed by stage name; each row maps
