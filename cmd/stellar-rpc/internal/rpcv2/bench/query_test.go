@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -26,22 +25,10 @@ import (
 func TestNewQueryCommand(t *testing.T) {
 	cmd := NewQueryCommand()
 	require.Equal(t, "bench-query", cmd.Use)
-
-	requiredBySubcommand := map[string][]string{
+	assertRequiredFlags(t, cmd, map[string][]string{
 		"cold": {"start-chunk", "cold-dir"},
 		"hot":  {"chunk", "hot-dir"},
-	}
-	subs := querySubcommands(t, cmd)
-	for name, flags := range requiredBySubcommand {
-		sub := subs[name]
-		require.NotNil(t, sub, "subcommand %q missing", name)
-		for _, fn := range flags {
-			f := sub.Flags().Lookup(fn)
-			require.NotNil(t, f, "%s: flag --%s missing", name, fn)
-			require.Contains(t, f.Annotations, cobra.BashCompOneRequiredFlag,
-				"%s: flag --%s not marked required", name, fn)
-		}
-	}
+	})
 }
 
 // TestQueryCommandAcceptsRunnerArgv parses the argv the campaign runner emits
@@ -81,7 +68,7 @@ func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sub := querySubcommands(t, NewQueryCommand())[tc.argv[0]]
+			sub := subcommandsByUse(NewQueryCommand())[tc.argv[0]]
 			require.NotNil(t, sub)
 			require.NoError(t, sub.ParseFlags(tc.argv[1:]))
 
@@ -116,7 +103,7 @@ func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 func TestQueryDefaultShapesMatchSLA(t *testing.T) {
 	for _, name := range []string{"cold", "hot"} {
 		t.Run(name, func(t *testing.T) {
-			sub := querySubcommands(t, NewQueryCommand())[name]
+			sub := subcommandsByUse(NewQueryCommand())[name]
 			require.NotNil(t, sub)
 
 			ledgersSpan, err := sub.Flags().GetUint32("ledgers-span")
@@ -649,14 +636,4 @@ func TestOpenHotFixtureServesHotChunk(t *testing.T) {
 func TestOpenHotFixtureRejectsMissingDatabase(t *testing.T) {
 	_, _, err := openHotFixture(testLogger(), hotQueryOptions{HotRoot: t.TempDir(), Chunk: chunk.ID(3)})
 	require.Error(t, err)
-}
-
-// querySubcommands indexes a command's children by Use.
-func querySubcommands(t *testing.T, cmd *cobra.Command) map[string]*cobra.Command {
-	t.Helper()
-	subs := make(map[string]*cobra.Command, len(cmd.Commands()))
-	for _, sub := range cmd.Commands() {
-		subs[sub.Use] = sub
-	}
-	return subs
 }
