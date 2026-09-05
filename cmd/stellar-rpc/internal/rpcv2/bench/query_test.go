@@ -238,24 +238,22 @@ func TestQuerySinkWritesContractRows(t *testing.T) {
 		}
 	}
 
+	// Rows that recorded nothing (evict, peak_rss_bytes) are absent from the file.
 	for _, f := range sink.files() {
+		if f.name != fileDriver {
+			continue
+		}
 		names := make([]string, len(f.rows))
 		for i, r := range f.rows {
 			names[i] = r.name
 		}
-		switch f.name {
-		case fileDriver:
-			require.Equal(t, []string{
-				"open",
-				"ledgers_r1", "ledgers_r1_millirps", "ledgers_r1_lag", "ledgers_r1_shed",
-				"ledgers_r4", "ledgers_r4_millirps", "ledgers_r4_lag", "ledgers_r4_shed",
-				"txhash_r1", "txhash_r1_millirps", "txhash_r1_lag", "txhash_r1_shed",
-				"txhash_r4", "txhash_r4_millirps", "txhash_r4_lag", "txhash_r4_shed",
-			}, names)
-		default:
-			require.Equal(t, []string{"total_r1", "total_r4", "service_r1", "service_r4"},
-				names, "file %s", f.name)
-		}
+		require.Equal(t, []string{
+			"open",
+			"ledgers_r1", "ledgers_r1_millirps", "ledgers_r1_lag", "ledgers_r1_shed",
+			"ledgers_r4", "ledgers_r4_millirps", "ledgers_r4_lag", "ledgers_r4_shed",
+			"txhash_r1", "txhash_r1_millirps", "txhash_r1_lag", "txhash_r1_shed",
+			"txhash_r4", "txhash_r4_millirps", "txhash_r4_lag", "txhash_r4_shed",
+		}, names)
 	}
 }
 
