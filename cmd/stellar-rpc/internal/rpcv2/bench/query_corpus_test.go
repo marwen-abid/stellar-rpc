@@ -51,8 +51,8 @@ func TestCorpusSpansManyLedgersOnADenseDataset(t *testing.T) {
 }
 
 func TestCorpusTakesEveryHashOfALedgerBelowTheCap(t *testing.T) {
-	const txPerLedger = 4
-	f, release := openDenseHotFixture(t, 256, txPerLedger)
+	const txPerLedger = corpusMaxHashesPerLedger / 2
+	f, release := openDenseHotFixture(t, 2*corpusTargetHashes/txPerLedger, txPerLedger)
 	defer release()
 
 	view, err := f.view()
@@ -70,7 +70,7 @@ func TestCorpusTakesEveryHashOfALedgerBelowTheCap(t *testing.T) {
 }
 
 func TestCorpusSkipsLedgersWithoutTransactions(t *testing.T) {
-	const numLedgers = 400
+	const numLedgers = 2 * eventEvery
 	packDir, txLedgers := writeSourcePack(t, t.TempDir(), chunk.ID(0), numLedgers)
 	f, release := openHotFixtureOverPack(t, packDir, numLedgers)
 	defer release()

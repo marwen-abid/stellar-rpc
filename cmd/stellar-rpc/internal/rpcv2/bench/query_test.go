@@ -389,7 +389,7 @@ func TestRunQueryCold(t *testing.T) {
 }
 
 func TestRunQueryHot(t *testing.T) {
-	const ingested = 400
+	const ingested = 2 * eventEvery
 	chunkID := chunk.ID(0)
 	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, ingested)
 	hotRoot := ingestHotChunk(t, packDir, ingested)
