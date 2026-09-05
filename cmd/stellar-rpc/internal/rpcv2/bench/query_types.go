@@ -159,16 +159,17 @@ func txHashRequest(ctx context.Context, f *queryFixture, corpus *txHashCorpus) q
 }
 
 // eventsRequest measures getEvents' read: one page of at most --events-limit
-// events over the fixture's range under a filter set from the corpus. An empty
-// page is not an error.
+// events from a random start ledger to the end of the fixture's range, under a
+// filter set from the corpus. An empty page is not an error.
 func eventsRequest(
 	ctx context.Context, f *queryFixture, p queryPlan, corpus *eventFilterCorpus,
 ) queryRequest {
 	return func(rng *rand.Rand) (cellSample, error) {
 		filters := corpus.pick(rng)
+		lo := f.pickStart(rng, 1)
 		hi := f.LastLedger
 		cursor := query.EventCursor{Scope: query.EventScope{
-			MinLedger: f.FirstLedger,
+			MinLedger: lo,
 			MaxLedger: &hi,
 			Dir:       query.Ascending,
 			Filters:   filters,
@@ -182,7 +183,7 @@ func eventsRequest(
 
 			page, err := view.QueryEvents(ctx, cursor, p.EventsLimit)
 			if err != nil {
-				return 0, fmt.Errorf("query events over [%d, %d]: %w", f.FirstLedger, hi, err)
+				return 0, fmt.Errorf("query events over [%d, %d]: %w", lo, hi, err)
 			}
 			return len(page.Events), nil
 		})
