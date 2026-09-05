@@ -4,7 +4,6 @@ import (
 	"context"
 	"math/rand/v2"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -271,19 +270,9 @@ func openDenseHotFixture(t *testing.T, numLedgers uint32, txPerLedger int) (*que
 // pubnet passphrase.
 func openHotFixtureOverPack(t *testing.T, packDir string, numLedgers uint32) (*queryFixture, func()) {
 	t.Helper()
-	chunkID := chunk.ID(0)
-	hotRoot := t.TempDir()
-	require.NoError(t, runHot(context.Background(), testLogger(), hotOptions{
-		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
-		StartChunk: chunkID,
-		NumChunks:  1,
-		NumLedgers: numLedgers,
-		HotRoot:    hotRoot,
-		OutDir:     filepath.Join(t.TempDir(), "csv"),
-	}))
 	f, release, err := openHotFixture(testLogger(), hotQueryOptions{
-		HotRoot: hotRoot,
-		Chunk:   chunkID,
+		HotRoot: ingestHotChunk(t, packDir, numLedgers),
+		Chunk:   chunk.ID(0),
 		Plan:    queryPlan{Passphrase: network.PublicNetworkPassphrase},
 	})
 	require.NoError(t, err)

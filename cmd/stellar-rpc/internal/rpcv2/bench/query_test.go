@@ -407,15 +407,7 @@ func TestRunQueryHot(t *testing.T) {
 	const ingested = 400
 	chunkID := chunk.ID(0)
 	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, ingested)
-	hotRoot := t.TempDir()
-	require.NoError(t, runHot(context.Background(), testLogger(), hotOptions{
-		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
-		StartChunk: chunkID,
-		NumChunks:  1,
-		NumLedgers: ingested,
-		HotRoot:    hotRoot,
-		OutDir:     filepath.Join(t.TempDir(), "csv"),
-	}))
+	hotRoot := ingestHotChunk(t, packDir, ingested)
 
 	csvDir := filepath.Join(t.TempDir(), "csv")
 	plan := testQueryPlan()
@@ -509,6 +501,22 @@ func ingestColdChunk(t *testing.T, chunkID chunk.ID) string {
 	return coldRoot
 }
 
+// ingestHotChunk runs bench-ingest hot over numLedgers ledgers of chunk 0 from
+// packDir and returns the hot database root.
+func ingestHotChunk(t *testing.T, packDir string, numLedgers uint32) string {
+	t.Helper()
+	hotRoot := t.TempDir()
+	require.NoError(t, runHot(context.Background(), testLogger(), hotOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
+		StartChunk: chunk.ID(0),
+		NumChunks:  1,
+		NumLedgers: numLedgers,
+		HotRoot:    hotRoot,
+		OutDir:     filepath.Join(t.TempDir(), "csv"),
+	}))
+	return hotRoot
+}
+
 func TestQueryRejectsWrongPassphrase(t *testing.T) {
 	chunkID := chunk.ID(0)
 	coldRoot := ingestColdChunk(t, chunkID)
@@ -591,15 +599,7 @@ func TestOpenHotFixtureServesHotChunk(t *testing.T) {
 	const ingested = 50
 	chunkID := chunk.ID(0)
 	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, ingested)
-	hotRoot := t.TempDir()
-	require.NoError(t, runHot(context.Background(), testLogger(), hotOptions{
-		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
-		StartChunk: chunkID,
-		NumChunks:  1,
-		NumLedgers: ingested,
-		HotRoot:    hotRoot,
-		OutDir:     filepath.Join(t.TempDir(), "csv"),
-	}))
+	hotRoot := ingestHotChunk(t, packDir, ingested)
 	first := chunkID.FirstLedger()
 
 	t.Run("uncapped sample", func(t *testing.T) {
