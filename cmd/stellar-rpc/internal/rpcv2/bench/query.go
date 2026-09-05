@@ -12,6 +12,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/stellar/go-stellar-sdk/network"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 )
 
 // NewQueryCommand returns the `bench-query` command tree: `cold` benchmarks
@@ -47,6 +49,10 @@ const (
 
 // maxTargetRPS is the highest arrival rate --target-rps accepts.
 const maxTargetRPS = 1_000_000
+
+// maxReadSpan is the widest span --ledgers-span and --txpage-span accept. A
+// request's last ledger is start+span-1 in uint32 and must not wrap.
+const maxReadSpan = chunk.LedgersPerChunk
 
 // queryFlags is the flag set both bench-query subcommands share, beyond --out
 // and the profiling flags newBenchCommand binds. The spellings and value
@@ -113,10 +119,10 @@ func (f *queryFlags) plan() (queryPlan, error) {
 		return queryPlan{}, fmt.Errorf("--duration must be > 0, got %v", f.duration)
 	case f.warmup < 0:
 		return queryPlan{}, fmt.Errorf("--warmup must be >= 0, got %d", f.warmup)
-	case f.ledgersSpan < 1:
-		return queryPlan{}, fmt.Errorf("--ledgers-span must be >= 1, got %d", f.ledgersSpan)
-	case f.txPageSpan < 1:
-		return queryPlan{}, fmt.Errorf("--txpage-span must be >= 1, got %d", f.txPageSpan)
+	case f.ledgersSpan < 1 || f.ledgersSpan > maxReadSpan:
+		return queryPlan{}, fmt.Errorf("--ledgers-span must be in [1, %d], got %d", maxReadSpan, f.ledgersSpan)
+	case f.txPageSpan < 1 || f.txPageSpan > maxReadSpan:
+		return queryPlan{}, fmt.Errorf("--txpage-span must be in [1, %d], got %d", maxReadSpan, f.txPageSpan)
 	case f.txPageLimit < 1:
 		return queryPlan{}, fmt.Errorf("--txpage-limit must be >= 1, got %d", f.txPageLimit)
 	case f.eventsLimit < 1:
