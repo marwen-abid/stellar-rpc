@@ -159,13 +159,18 @@ func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFix
 		release()
 		return nil, nil, fmt.Errorf("seed close times: %w", err)
 	}
+	evictPaths, err := coldArtifactPaths(cat, layout, chunks)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
 	f := &queryFixture{
 		registry:    registry,
 		Passphrase:  opts.Plan.Passphrase,
 		Chunks:      chunks,
 		FirstLedger: opts.StartChunk.FirstLedger(),
 		LastLedger:  end.LastLedger(),
-		EvictPaths:  coldArtifactPaths(cat, layout, chunks),
+		EvictPaths:  evictPaths,
 	}
 	if err := f.verifyServes(); err != nil {
 		release()
@@ -176,12 +181,15 @@ func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFix
 
 // coldArtifactPaths lists every file the chunks are served from: each chunk's
 // frozen artifacts and the frozen tx-hash window indexes, read off the catalog.
-func coldArtifactPaths(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.ID) []string {
+func coldArtifactPaths(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.ID) ([]string, error) {
 	var paths []string
 	for _, c := range chunks {
 		for _, kind := range geometry.AllKinds() {
 			state, err := cat.State(c, kind)
-			if err != nil || state != geometry.StateFrozen {
+			if err != nil {
+				return nil, fmt.Errorf("read the state of chunk %s %s: %w", c, kind, err)
+			}
+			if state != geometry.StateFrozen {
 				continue
 			}
 			paths = append(paths, layout.ArtifactPaths(c, kind)...)
@@ -189,14 +197,14 @@ func coldArtifactPaths(cat *catalog.Catalog, layout geometry.Layout, chunks []ch
 	}
 	covs, err := cat.AllTxHashIndexKeys()
 	if err != nil {
-		return paths
+		return nil, fmt.Errorf("list tx-hash index coverages: %w", err)
 	}
 	for _, cov := range covs {
 		if cov.State == geometry.StateFrozen {
 			paths = append(paths, layout.TxHashIndexFilePath(cov))
 		}
 	}
-	return paths
+	return paths, nil
 }
 
 // freezeChunks runs the freeze bracket over each chunk for the artifact kinds
