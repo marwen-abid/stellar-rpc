@@ -260,10 +260,8 @@ func TestCSVSinkPaceLagBelowFirstSeq(t *testing.T) {
 	assert.Empty(t, paceLagSamples(sink))
 }
 
-// TestCSVSinkKeepsZeroLagAndShedSamples pins the query bench's zero-keeping
-// rows against the ordinary filter: a leg's _lag and _shed rows survive with
-// nothing but zero durations, while a latency row whose only sample is zero is
-// still dropped as work too fast for the timer.
+// TestCSVSinkKeepsZeroLagAndShedSamples: _lag and _shed rows with only zero
+// samples are written; a latency row with only zero samples is dropped.
 func TestCSVSinkKeepsZeroLagAndShedSamples(t *testing.T) {
 	sink := newSchemaCSVSink(querySpecs([]string{queryTypeLedgers}, []float64{1}))
 	sink.observe(fileDriver, "ledgers_r1_lag", 0, 1)
@@ -284,7 +282,6 @@ func TestCSVSinkKeepsZeroLagAndShedSamples(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(outDir, "ledgers.csv"))
 }
 
-// TestKeepsZeroSamples pins which rows keep their zero-duration samples.
 func TestKeepsZeroSamples(t *testing.T) {
 	for label, want := range map[string]bool{
 		"pace_lag":            true,

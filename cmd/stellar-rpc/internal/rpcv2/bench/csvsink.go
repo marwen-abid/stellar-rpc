@@ -141,21 +141,17 @@ var fileSpecs = func() []fileSpec {
 	)
 }()
 
-// querySpecs is the bench-query report schema for one run: one CSV per query
-// type holding that type's leg rows, plus driver.csv holding the setup rows and
-// each leg's driver metrics. The row set is the --types × --target-rps ladder,
-// so it is built per run. The labels are the results converter's contract:
+// querySpecs is the bench-query report schema for one run over types and
+// rates. The results converter reads it as follows:
 //
-//   - Every CSV in the run dir other than driver.csv is a query type, named by
-//     its basename.
-//   - total_r<rate> is a leg's headline distribution: the scheduled latency of
-//     every measured request. service_r<rate>, found_r<rate> and miss_r<rate>
-//     are side rows over the same requests. A consumer must read
-//     <qtype>_r<rate>_shed next to total_r<rate>: once a leg sheds,
-//     total_r<rate> covers only the requests the dispatcher could offer.
+//   - Every CSV other than driver.csv is one query type, named by basename.
+//   - total_r<rate> is the scheduled latency of every measured request of the
+//     leg at <rate>; service_r<rate>, found_r<rate> and miss_r<rate> are side
+//     rows over the same requests. Once a leg sheds, total_r<rate> covers only
+//     the requests that got a slot; <qtype>_r<rate>_shed in driver.csv holds
+//     the count.
 //   - In driver.csv, <qtype>_r<rate> is the leg's wall clock; _millirps, _lag
-//     and _shed are its achieved rate times 1000, its dispatch-lag distribution
-//     and its shed count.
+//     and _shed hold achieved rate × 1000, dispatch lag and shed count.
 //   - A driver row with no _r<rate> segment (open, evict, peak_rss_bytes) is
 //     setup.
 func querySpecs(types []string, rates []float64) []fileSpec {
@@ -234,8 +230,8 @@ type csvSink struct {
 	mu   sync.Mutex
 	rows map[rowKey]*series // every signal is one sample on a (file, row) key
 
-	// specs is the report schema this sink renders through: fileSpecs for an
-	// ingest run, querySpecs for a query run. Read-only after construction.
+	// specs is the report schema files renders through. Read-only after
+	// construction.
 	specs []fileSpec
 
 	// hotBurst accumulates the current hot ledger's HotPhase durations so
@@ -259,12 +255,12 @@ var (
 	_ observability.Metrics = (*csvSink)(nil)
 )
 
-// newCSVSink returns an empty recorder rendering through the bench-ingest schema.
+// newCSVSink returns an empty recorder with the bench-ingest schema.
 func newCSVSink() *csvSink {
 	return newSchemaCSVSink(fileSpecs)
 }
 
-// newSchemaCSVSink returns an empty recorder rendering through specs.
+// newSchemaCSVSink returns an empty recorder with schema specs.
 func newSchemaCSVSink(specs []fileSpec) *csvSink {
 	return &csvSink{rows: make(map[rowKey]*series), specs: specs}
 }
@@ -428,11 +424,8 @@ type row struct {
 	maxv  time.Duration
 }
 
-// aggregate reduces a series to a row, filtering out zero-duration samples so
-// work too fast for the timer (an empty ledger's stage) doesn't skew the
-// percentiles. Rows whose zeros are real observations pass includeZeros and
-// keep them (see keepsZeroSamples). ok is false when no sample survives the
-// filter — the row is suppressed.
+// aggregate reduces a series to a row. Zero-duration samples are dropped unless
+// includeZeros (see keepsZeroSamples). ok is false when no sample survives.
 func aggregate(name string, s *series, includeZeros bool) (row, bool) {
 	durs := make([]time.Duration, 0, len(s.samples))
 	items := 0
@@ -480,12 +473,9 @@ func withUnknown[V any](order []string, m map[string]V) []string {
 	return append(slices.Clone(order), extra...)
 }
 
-// keepsZeroSamples reports whether a row keeps its zero-duration samples: the
-// rows in which a zero is a real observation (a ledger committed on time, a
-// request dispatched on time, a leg that shed or answered nothing). Everywhere
-// else a zero is work too fast for the timer, which aggregate drops. The rule
-// matches label suffixes so it covers both schemas: the ingest report's
-// pace_lag ends in _lag.
+// keepsZeroSamples reports whether a row's zero-duration samples are real
+// observations (on-time dispatch, nothing shed, zero rate) and are kept. It
+// matches by suffix: the ingest report's pace_lag ends in _lag.
 func keepsZeroSamples(label string) bool {
 	return strings.HasSuffix(label, driverLegLagSuffix) ||
 		strings.HasSuffix(label, driverLegShedSuffix) ||
@@ -589,9 +579,8 @@ func (s *csvSink) logSummary(logger *supportlog.Entry) {
 	}
 }
 
-// logRow logs one aggregated row as a percentile line. Three driver rows carry
-// a plain number in their duration columns (peak RSS in bytes, a leg's achieved
-// rate in milli-rps, a leg's shed count) and are rendered as that number.
+// logRow logs one aggregated row. Driver rows whose duration columns carry a
+// count (peak RSS bytes, milli-rps, shed) log that number.
 func logRow(logger *supportlog.Entry, fileName string, r row) {
 	switch {
 	case fileName != fileDriver:

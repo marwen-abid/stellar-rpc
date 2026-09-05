@@ -106,24 +106,21 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 	}
 }
 
-// flagBinder is one flag group newBenchCommand binds onto a subcommand, so a
-// second command family can share --out, profiling and the invocation record.
+// flagBinder is a flag group newBenchCommand binds onto a subcommand.
 type flagBinder interface {
 	bind(cmd *cobra.Command)
 }
 
-// runEnv is what a run gets from its command wrapper: where to write, and Extra
-// for facts the run resolves for itself that invocation.json cannot read off a
-// flag, such as whether page-cache eviction ran on this platform.
+// runEnv is what newBenchCommand hands a run. Entries the run adds to Extra
+// land in invocation.json.
 type runEnv struct {
 	OutDir string
 	Extra  map[string]string
 }
 
-// newBenchCommand builds one bench subcommand skeleton: no positional args,
-// SIGINT-canceled context, Info-level logger, profiling around run, an
-// invocation.json record written to --out when the run starts and again when it
-// stops, with --out, the profile flags and each caller-supplied flag group bound.
+// newBenchCommand builds one bench subcommand: no positional args,
+// SIGINT-canceled context, Info-level logger, profiling around run, --out and
+// groups bound, invocation.json written to --out at start and at end.
 func newBenchCommand(
 	use, short string, prof *profileFlags,
 	run func(ctx context.Context, logger *supportlog.Entry, env runEnv) error,
@@ -140,9 +137,6 @@ func newBenchCommand(
 			defer stop()
 			startedAt := time.Now().UTC()
 			env := runEnv{OutDir: outDir, Extra: map[string]string{}}
-			// Written now so a run killed outright still leaves its argv and
-			// start time in --out; the end-of-run write adds the outcome.
-			// Creating --out here also reports an unwritable one at once.
 			if err := os.MkdirAll(outDir, 0o755); err != nil {
 				return fmt.Errorf("create --out dir %s: %w", outDir, err)
 			}
@@ -150,8 +144,6 @@ func newBenchCommand(
 				return err
 			}
 			runErr := prof.around(logger, func() error { return run(ctx, logger, env) })
-			// A failing final write only warns: the run's own error is the one
-			// to surface, and the start record is already on disk.
 			if err := writeInvocationJSON(
 				outDir, cmd, captureFlags(cmd), env.Extra, startedAt, time.Now().UTC(), runErr,
 			); err != nil {

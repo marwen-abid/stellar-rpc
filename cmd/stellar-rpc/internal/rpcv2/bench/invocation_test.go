@@ -47,10 +47,8 @@ func TestCommandRecordsFailedRun(t *testing.T) {
 	assert.NotEmpty(t, record.FinishedAt)
 }
 
-// TestCommandWritesInvocationBeforeTheRun drives bench-ingest hot with a source
-// its validation rejects, so the run returns before it would have created --out.
-// The record is there anyway, which only the write at the start of the run can
-// have produced.
+// TestCommandWritesInvocationBeforeTheRun: a run that fails validation before
+// it would create --out still leaves invocation.json there.
 func TestCommandWritesInvocationBeforeTheRun(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "csv")
 
@@ -74,16 +72,12 @@ func TestCommandWritesInvocationBeforeTheRun(t *testing.T) {
 	assert.Equal(t, "bench-ingest hot", record.Command)
 	assert.Equal(t, "bogus", record.Flags["source"])
 	assert.NotEmpty(t, record.StartedAt)
-	// The run finished, so the second write replaced the start record with the
-	// outcome.
 	assert.Equal(t, err.Error(), record.Error)
 	assert.NotEmpty(t, record.FinishedAt)
 }
 
-// TestWriteStartInvocationJSON pins the record a run leaves the moment it
-// starts: the command, its flags and a start time, with no finishedAt and no
-// error key, so a reader can tell a run that never reached its end from one that
-// did.
+// TestWriteStartInvocationJSON: the start record has no finishedAt and no
+// error key.
 func TestWriteStartInvocationJSON(t *testing.T) {
 	outDir := t.TempDir()
 	parent := &cobra.Command{Use: "bench-query"}
@@ -154,7 +148,6 @@ func TestWriteInvocationJSON(t *testing.T) {
 	assert.Contains(t, record.Flags, "num-chunks")
 	assert.Equal(t, "10", record.Flags["num-chunks"])
 
-	// The run's own facts land beside the flags, not among them.
 	assert.Equal(t, "on", record.Extra["pageCacheEviction"])
 
 	// Verify timestamps
@@ -192,7 +185,6 @@ func TestWriteInvocationJSONWithError(t *testing.T) {
 	assert.Equal(t, runErr.Error(), record.Error)
 	assert.Equal(t, 1, record.SchemaVersion)
 
-	// A run that recorded no facts of its own omits the key entirely.
 	var raw map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &raw))
 	assert.NotContains(t, raw, "extra")

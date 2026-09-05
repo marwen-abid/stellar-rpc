@@ -9,37 +9,30 @@ import (
 	"time"
 )
 
-// The query bench's dispatcher: it issues a per-request closure at a fixed
-// arrival rate and collects what every request observed. It does no I/O of its
-// own, so the only thing between the timer and the store is the query itself.
+// The query bench's dispatcher: it issues a queryRequest at a fixed arrival
+// rate and collects what each request observed.
 
 // cellSample is one measured request.
 type cellSample struct {
-	// service is how long the request body itself ran (see timed).
+	// service is the request body's run time (see timed).
 	service time.Duration
-	// scheduled spans the request's due time to its completion: service time
-	// plus dispatch lag, the latency a client sending at the target rate sees.
+	// scheduled spans due time to completion: service plus dispatch lag.
 	scheduled time.Duration
-	// items counts what the response carried: ledgers, transactions or events.
+	// items counts what the response carried.
 	items int
-	// stage names a sub-stage reported apart from the type's blended row. Only
-	// txhash sets it (found vs miss).
+	// stage names a sub-stage row (txhash: found or miss); empty otherwise.
 	stage string
 }
 
-// queryRequest issues one request against the fixture. It runs on its own
-// goroutine with the RNG the dispatcher hands it, so it must treat its corpus
-// as read-only and share no mutable state between concurrent requests.
-// Read-view acquisition is inside the timer: a served request pays for its view.
+// queryRequest issues one request. Calls run concurrently on separate
+// goroutines; rng is per call. Read-view acquisition is inside the timer.
 type queryRequest func(rng *rand.Rand) (cellSample, error)
 
-// maxInFlight caps the requests a paced leg has outstanding. A request arriving
-// at a full cap is shed and counted, so a rate the store cannot keep up with
-// shows as a shed count and the leg's goroutine count stays bounded.
+// maxInFlight caps a leg's outstanding requests; a request due at a full cap
+// is shed.
 const maxInFlight = 512
 
-// Mixing constants for the per-request seeds: odd and mutually prime, so the
-// seed, the position and the rate each move both PCG words.
+// Mixing constants for legRNG: odd and mutually prime.
 const (
 	legSeedRateHi = 1000003
 	legSeedRateLo = 73
@@ -48,19 +41,17 @@ const (
 
 // legResult is one paced leg's outcome.
 type legResult struct {
-	// samples holds the measured requests that answered; a failed one has no
-	// latency to report.
+	// samples holds the measured requests that answered.
 	samples []cellSample
-	// lags holds one dispatch lag per measured position in schedule order,
-	// shed positions included. A zero is an on-time dispatch and is kept.
+	// lags holds one dispatch lag per measured position, shed positions
+	// included.
 	lags []time.Duration
-	// offered is the leg's offered window: measured positions times the
-	// arrival interval, the denominator of the achieved rate.
+	// offered is measured positions × interval, the denominator of the
+	// achieved rate.
 	offered time.Duration
-	// wall spans the first measured due time to the last measured completion,
-	// drain tail included.
+	// wall spans the first measured due time to the last measured completion.
 	wall time.Duration
-	// dispatched counts the measured requests that got a slot and ran.
+	// dispatched counts the measured requests that ran.
 	dispatched int
 	// shed counts the measured requests dropped at a full maxInFlight.
 	shed int
@@ -68,8 +59,7 @@ type legResult struct {
 	errs int
 }
 
-// legCollector gathers a paced leg's outcome; the dispatch loop and the
-// request goroutines write to it concurrently.
+// legCollector gathers a leg's outcome. Safe for concurrent use.
 type legCollector struct {
 	mu         sync.Mutex
 	samples    []cellSample
@@ -80,8 +70,6 @@ type legCollector struct {
 	errs       int
 }
 
-// recordLag charges a measured position its lag behind its due time, whether
-// its request ran or was shed.
 func (c *legCollector) recordLag(lag time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -100,7 +88,6 @@ func (c *legCollector) recordShed() {
 	c.shed++
 }
 
-// recordSample stores a sample; the latest completion is where the wall ends.
 func (c *legCollector) recordSample(s cellSample, done time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -110,8 +97,6 @@ func (c *legCollector) recordSample(s cellSample, done time.Time) {
 	}
 }
 
-// recordError counts a failed request. It occupied the leg like any other, so
-// its completion counts toward the wall.
 func (c *legCollector) recordError(done time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -121,8 +106,8 @@ func (c *legCollector) recordError(done time.Time) {
 	}
 }
 
-// result assembles the leg's outcome with the wall measured from firstDue. A
-// leg in which nothing completed reports a zero wall.
+// result assembles the leg's outcome. wall is measured from firstDue and is
+// zero when nothing completed.
 func (c *legCollector) result(firstDue time.Time) legResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -139,15 +124,13 @@ func (c *legCollector) result(firstDue time.Time) legResult {
 	return out
 }
 
-// runPacedLeg issues req at rps requests per second. Position i is due at
-// anchor + i×interval (interval = 1 s / rps, anchor = the first dispatch). Due
-// times are absolute, so a slow request delays no later one and the leg keeps
-// its rate whatever the store does with it. Positions 0 to warmup-1 record
-// nothing; the round(rps × duration) positions after them are measured, and
-// the leg offers the store measured×interval of arrivals.
+// runPacedLeg issues req at rps requests per second: position i is due at
+// anchor + i×interval, anchor being the first dispatch. Positions 0 to
+// warmup-1 record nothing; the round(rps × duration) positions after them are
+// measured.
 //
-// The returned error is a context error: the leg was cut short, discard its
-// result. A request that fails is counted in errs and does not end the leg.
+// A non-nil error is a bad argument or a context error; discard the result. A
+// failing request is counted in errs and does not end the leg.
 func runPacedLeg(
 	ctx context.Context, rps float64, duration time.Duration, warmup int, seed int64, req queryRequest,
 ) (legResult, error) {
@@ -166,7 +149,6 @@ func runPacedLeg(
 	slots := make(chan struct{}, maxInFlight)
 	var wg sync.WaitGroup
 	for pos := range warmup + measured {
-		// Checked every iteration: a lagging dispatcher's sleeps return at once.
 		if err := ctx.Err(); err != nil {
 			wg.Wait()
 			return legResult{}, err
@@ -184,10 +166,9 @@ func runPacedLeg(
 	return res, nil
 }
 
-// launchPacedRequest runs one request on its own goroutine after taking a slot;
-// with none free the request is shed and runs nothing. A measured position is
-// charged its lag before the cap check, so the lag distribution covers shed
-// positions too. A warmup request runs in full and records nothing.
+// launchPacedRequest runs one request on its own goroutine when a slot is free
+// and sheds it otherwise. A measured position records its lag whether or not
+// it is shed; a warmup position records nothing.
 func launchPacedRequest(
 	wg *sync.WaitGroup, slots chan struct{}, collector *legCollector,
 	req queryRequest, rng *rand.Rand, due time.Time, measured bool,
@@ -221,10 +202,9 @@ func launchPacedRequest(
 	})
 }
 
-// legRNG mixes the rate and the position into the run's seed: the rate keeps
-// two legs of one query type drawing different sequences, the position keeps
-// two requests of one leg drawing different work, and no measured position
-// replays a warmup draw.
+// legRNG derives a request's RNG from the run seed, the position and the rate.
+// Two positions of one leg, or one position of two legs at different rates,
+// draw different sequences.
 func legRNG(seed int64, pos int, rps float64) *rand.Rand {
 	rateBits := math.Float64bits(rps)
 	//nolint:gosec // seed mixing, not cryptography
@@ -234,14 +214,11 @@ func legRNG(seed int64, pos int, rps float64) *rand.Rand {
 	))
 }
 
-// measuredRequests is round(rps × duration), never fewer than one, so a rate
-// too slow to schedule one request in the leg still measures something.
 func measuredRequests(rps float64, duration time.Duration) int {
 	return max(1, int(math.Round(rps*duration.Seconds())))
 }
 
-// timed runs fn and returns a sample whose service time is how long fn took,
-// so a per-type body times exactly the request and nothing around it.
+// timed runs fn and returns a sample with fn's run time as service.
 //
 //nolint:unparam // stage is set by the txhash body in bench-query/02-read-path, the next PR in this stack
 func timed(stage string, fn func() (int, error)) (cellSample, error) {

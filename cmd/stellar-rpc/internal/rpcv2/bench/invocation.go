@@ -23,12 +23,9 @@ type invocationRecord struct {
 	Binary        binaryInfo        `json:"binary"`
 	Hostname      string            `json:"hostname"`
 	StartedAt     string            `json:"startedAt"`
-	// FinishedAt is absent in the record written at start, so a record without
-	// it is a run that was killed before it finished.
+	// FinishedAt is absent while the run is in progress.
 	FinishedAt string `json:"finishedAt,omitempty"`
-	// Extra carries facts the run resolved for itself rather than read off a
-	// flag, such as whether page-cache eviction ran. Absent when none were
-	// recorded.
+	// Extra holds what the run put in runEnv.Extra. Absent when empty.
 	Extra map[string]string `json:"extra,omitempty"`
 	// Error carries a failed run's error message; absent on a successful run.
 	Error string `json:"error,omitempty"`
@@ -42,9 +39,8 @@ type binaryInfo struct {
 	Branch         string `json:"branch"`
 }
 
-// writeStartInvocationJSON writes the record of a run that has just started:
-// command, flags and start time, with no finishedAt and no error. The write at
-// the end of the run overwrites the same file.
+// writeStartInvocationJSON writes the record of a run in progress: no
+// finishedAt, no error.
 func writeStartInvocationJSON(
 	outDir string, cmd *cobra.Command, flags, extra map[string]string, startedAt time.Time,
 ) error {
@@ -52,9 +48,8 @@ func writeStartInvocationJSON(
 }
 
 // writeInvocationJSON writes an invocation record to outDir/invocation.json,
-// replacing any existing file. A zero finishedAt leaves the field out, which is
-// how a run in progress records itself; a non-nil runErr's message lands in the
-// error field. Indented JSON with a trailing newline.
+// replacing any existing file. A zero finishedAt leaves the field out; a
+// non-nil runErr's message fills the error field.
 func writeInvocationJSON(
 	outDir string,
 	cmd *cobra.Command,

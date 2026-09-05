@@ -14,17 +14,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// countingRequest is a queryRequest that counts every call, so a test can tell
-// how many requests a leg actually issued — warmup requests included, which
-// leave no sample behind. Its body sleeps for countingRequestService so that
-// the service time it reports is never zero: an empty body can start and finish
-// inside one clock tick, and timed would then read the same value twice.
+// countingRequest is a queryRequest that counts calls, warmup included, and
+// sleeps countingRequestService so service is never zero.
 type countingRequest struct {
 	calls atomic.Int64
 }
 
-// countingRequestService is the work countingRequest does, long enough for the
-// clock to move and short enough to leave the leg's pacing alone.
 const countingRequestService = 50 * time.Microsecond
 
 func (c *countingRequest) run(*rand.Rand) (cellSample, error) {
@@ -35,12 +30,8 @@ func (c *countingRequest) run(*rand.Rand) (cellSample, error) {
 	})
 }
 
-// TestRunPacedLegMeasuredCount pins the shape of a clean leg: the number of
-// measured requests is round(rps × duration), warmup requests run at the leg's
-// rate but leave no sample, the offered window is the measured positions times
-// the arrival interval, every measured request that answered carries a
-// scheduled latency at least as long as its service time, and nothing is shed
-// or fails.
+// TestRunPacedLegMeasuredCount: a clean leg measures round(rps × duration)
+// requests, runs warmup requests without sampling them, and sheds nothing.
 func TestRunPacedLegMeasuredCount(t *testing.T) {
 	const rps = 200.0
 	fake := &countingRequest{}
@@ -66,8 +57,7 @@ func TestRunPacedLegMeasuredCount(t *testing.T) {
 	}
 }
 
-// drawRecorder is a queryRequest that answers immediately and records the first
-// value each request draws from the RNG it was handed.
+// drawRecorder is a queryRequest that records each request's first RNG draw.
 type drawRecorder struct {
 	mu    sync.Mutex
 	draws []uint64
@@ -81,9 +71,8 @@ func (d *drawRecorder) run(rng *rand.Rand) (cellSample, error) {
 	return timed("", func() (int, error) { return 1, nil })
 }
 
-// TestRunPacedLegRNGIndependence pins that every request of a leg draws its own
-// sequence and that two legs of one seed at different rates draw different
-// sequences, so a later leg does not repeat the work an earlier one warmed.
+// TestRunPacedLegRNGIndependence: requests of one leg, and legs at different
+// rates, draw distinct values.
 func TestRunPacedLegRNGIndependence(t *testing.T) {
 	first := &drawRecorder{}
 	_, err := runPacedLeg(t.Context(), 500, 40*time.Millisecond, 0, 7, first.run)
@@ -105,8 +94,7 @@ func TestRunPacedLegRNGIndependence(t *testing.T) {
 	}
 }
 
-// blockingRequest is a queryRequest that holds its slot until release is
-// closed, so a test can fill the in-flight cap and keep it full.
+// blockingRequest is a queryRequest that blocks until release is closed.
 type blockingRequest struct {
 	release  chan struct{}
 	inFlight atomic.Int64
@@ -123,15 +111,12 @@ func (b *blockingRequest) run(*rand.Rand) (cellSample, error) {
 	})
 }
 
-// TestRunPacedLegSheds pins what a leg does when the store cannot keep up: the
-// first maxInFlight measured requests get a slot and every later one is shed,
-// no position is silently skipped, the shed requests leave no sample, and the
-// lag row still covers every measured position.
+// TestRunPacedLegSheds: with every slot held, the first maxInFlight measured
+// requests run and the rest are shed; lags cover every measured position.
 func TestRunPacedLegSheds(t *testing.T) {
 	fake := &blockingRequest{release: make(chan struct{})}
-	// The leg's schedule spans 100ms and a shed position costs nothing, so the
-	// dispatch loop is over well before the release fires. Releasing only then
-	// keeps every slot occupied for the whole loop.
+	// Released after the 100ms schedule ends: every slot stays held for the
+	// whole dispatch loop.
 	timer := time.AfterFunc(500*time.Millisecond, func() { close(fake.release) })
 	defer timer.Stop()
 
@@ -147,9 +132,8 @@ func TestRunPacedLegSheds(t *testing.T) {
 	assert.Equal(t, int64(0), fake.inFlight.Load())
 }
 
-// TestRunPacedLegCountsErrors pins that a failed request is counted and leaves
-// no sample, that it does not end the leg, and that a failure does not change
-// the window the leg offered.
+// TestRunPacedLegCountsErrors: a failed request is counted, leaves no sample
+// and does not end the leg.
 func TestRunPacedLegCountsErrors(t *testing.T) {
 	const rps = 200.0
 	var ordinal atomic.Int64
@@ -172,14 +156,13 @@ func TestRunPacedLegCountsErrors(t *testing.T) {
 	assert.Equal(t, offeredWindow(rps, res), res.offered)
 }
 
-// offeredWindow is the span of arrivals a leg at rate rps offered: one arrival
-// interval per measured position, shed positions included.
+// offeredWindow is the expected legResult.offered of a leg at rps.
 func offeredWindow(rps float64, res legResult) time.Duration {
 	return time.Duration(res.dispatched+res.shed) * time.Duration(float64(time.Second)/rps)
 }
 
-// TestRunPacedLegContextCancel pins that a canceled context ends the leg at its
-// next due time, reports the context's error, and leaves no request running.
+// TestRunPacedLegContextCancel: a canceled context ends the leg with the
+// context's error and no request running.
 func TestRunPacedLegContextCancel(t *testing.T) {
 	fake := &countingRequest{}
 	inFlight := &atomic.Int64{}
@@ -202,16 +185,10 @@ func TestRunPacedLegContextCancel(t *testing.T) {
 	assert.Equal(t, int64(0), inFlight.Load())
 }
 
-// TestRunPacedLegLagStaysSmall pins that the dispatcher keeps its schedule when
-// requests take longer than the arrival interval. Requests run concurrently, so
-// a slow request holds up no later dispatch: the leg reports one lag per
-// dispatched request, the typical lag is a small fraction of the service time,
-// and the whole leg finishes in about its scheduled span rather than in the sum
-// of its requests.
-//
-// The assertions are on the median lag and the wall rather than on the worst
-// lag, because a single dispatch can lose the CPU for tens of milliseconds on a
-// busy machine while the dispatcher is still on schedule overall.
+// TestRunPacedLegLagStaysSmall: requests longer than the arrival interval hold
+// up no later dispatch. It asserts on the median lag and the wall, not the
+// worst lag: one dispatch can lose the CPU for tens of milliseconds on a busy
+// machine.
 func TestRunPacedLegLagStaysSmall(t *testing.T) {
 	const service = 20 * time.Millisecond
 	req := func(*rand.Rand) (cellSample, error) {
@@ -233,16 +210,12 @@ func TestRunPacedLegLagStaysSmall(t *testing.T) {
 	sorted := slices.Clone(res.lags)
 	slices.Sort(sorted)
 	assert.Less(t, sorted[len(sorted)/2], service, "median dispatch lag")
-	// A serialized leg would run 50 requests of 20ms back to back, so it could
-	// not finish inside half a second.
+	// 50 serialized 20ms requests would take 1s.
 	assert.Less(t, res.wall, 500*time.Millisecond, "leg wall")
 }
 
-// TestLaunchPacedRequestChargesLateDispatch pins that a dispatch the loop
-// reached late is charged to the scheduled latency a client sees rather than
-// hidden in the service time, which is the property the open-loop mode exists
-// for. The request itself answers immediately, so everything the scheduled
-// latency holds beyond it is the dispatcher's own lateness.
+// TestLaunchPacedRequestChargesLateDispatch: a late dispatch shows in
+// scheduled and in the lag, not in service.
 func TestLaunchPacedRequestChargesLateDispatch(t *testing.T) {
 	const late = 50 * time.Millisecond
 	req := func(*rand.Rand) (cellSample, error) {
@@ -265,8 +238,8 @@ func TestLaunchPacedRequestChargesLateDispatch(t *testing.T) {
 	assert.GreaterOrEqual(t, res.lags[0], late, "the dispatch lag is charged too")
 }
 
-// TestRunPacedLegRejectsBadArguments pins that a leg with no rate or no
-// duration is refused rather than run as an empty measurement.
+// TestRunPacedLegRejectsBadArguments: a zero rate or a zero duration is an
+// error.
 func TestRunPacedLegRejectsBadArguments(t *testing.T) {
 	req := func(*rand.Rand) (cellSample, error) {
 		return timed("", func() (int, error) { return 1, nil })

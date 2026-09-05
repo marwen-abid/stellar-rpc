@@ -13,8 +13,7 @@ import (
 
 const catalogBaseDirPerm os.FileMode = 0o755 // owner rwx, group/others rx
 
-// Temp-dir prefix naming which bench owns a scratch catalog, so a leftover dir
-// says where it came from.
+// Temp-dir prefixes for scratch catalogs, one per bench.
 const (
 	scratchPrefixIngest = "bench-ingest-catalog-"
 )
