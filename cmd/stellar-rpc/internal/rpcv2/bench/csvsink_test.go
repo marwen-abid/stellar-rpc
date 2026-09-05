@@ -283,15 +283,20 @@ func TestCSVSinkKeepsZeroLagAndShedSamples(t *testing.T) {
 }
 
 func TestKeepsZeroSamples(t *testing.T) {
-	for label, want := range map[string]bool{
-		"pace_lag":            true,
-		"txhash_r300_lag":     true,
-		"events_r0.5_shed":    true,
-		"ledgers_r1_millirps": true,
-		"ledgers_r1":          false,
-		"open":                false,
+	for _, tc := range []struct {
+		file, label string
+		want        bool
+	}{
+		{fileDriver, "pace_lag", true},
+		{fileDriver, "txhash_r300_lag", true},
+		{fileDriver, "events_r0.5_shed", true},
+		{fileDriver, "ledgers_r1_millirps", true},
+		{fileDriver, "ledgers_r1", false},
+		{fileDriver, "open", false},
+		{queryTypeLedgers, "total_r1_lag", false},
+		{fileHot, "commit_lag", false},
 	} {
-		assert.Equal(t, want, keepsZeroSamples(label), "keepsZeroSamples(%q)", label)
+		assert.Equal(t, tc.want, keepsZeroSamples(tc.file, tc.label), "keepsZeroSamples(%q, %q)", tc.file, tc.label)
 	}
 }
 

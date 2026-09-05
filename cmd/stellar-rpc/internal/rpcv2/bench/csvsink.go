@@ -474,12 +474,13 @@ func withUnknown[V any](order []string, m map[string]V) []string {
 }
 
 // keepsZeroSamples reports whether a row's zero-duration samples are real
-// observations (on-time dispatch, nothing shed, zero rate) and are kept. It
-// matches by suffix: the ingest report's pace_lag ends in _lag.
-func keepsZeroSamples(label string) bool {
-	return strings.HasSuffix(label, driverLegLagSuffix) ||
+// observations (on-time dispatch, nothing shed, zero rate) and are kept. Only
+// driver.csv has such rows; it matches them by suffix, and the ingest report's
+// pace_lag ends in _lag.
+func keepsZeroSamples(file, label string) bool {
+	return file == fileDriver && (strings.HasSuffix(label, driverLegLagSuffix) ||
 		strings.HasSuffix(label, driverLegShedSuffix) ||
-		strings.HasSuffix(label, driverLegRPSSuffix)
+		strings.HasSuffix(label, driverLegRPSSuffix))
 }
 
 // file is one aggregated CSV file: its basename (without .csv) and its rows.
@@ -516,7 +517,7 @@ func (s *csvSink) files() []file {
 		var rows []row
 		for _, label := range withUnknown(rowOrders[name], byRow) {
 			if sr := byRow[label]; sr != nil {
-				if r, ok := aggregate(label, sr, keepsZeroSamples(label)); ok {
+				if r, ok := aggregate(label, sr, keepsZeroSamples(name, label)); ok {
 					rows = append(rows, r)
 				}
 			}
