@@ -616,23 +616,23 @@ func TestOpenHotFixtureServesHotChunk(t *testing.T) {
 		assert.Len(t, view.HotTxHashIndexes(), 1)
 	})
 
-	t.Run("capped sample", func(t *testing.T) {
-		f, release, err := openHotFixture(testLogger(), hotQueryOptions{
-			HotRoot: hotRoot, Chunk: chunkID, SampleLedgers: 10,
+	for _, tc := range []struct {
+		name          string
+		sampleLedgers uint32
+		wantLast      uint32
+	}{
+		{name: "capped sample", sampleLedgers: 10, wantLast: first + 9},
+		{name: "cap past what was ingested", sampleLedgers: chunk.LedgersPerChunk, wantLast: first + ingested - 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, release, err := openHotFixture(testLogger(), hotQueryOptions{
+				HotRoot: hotRoot, Chunk: chunkID, SampleLedgers: tc.sampleLedgers,
+			})
+			require.NoError(t, err)
+			defer release()
+			assert.Equal(t, tc.wantLast, f.LastLedger)
 		})
-		require.NoError(t, err)
-		defer release()
-		assert.Equal(t, first+9, f.LastLedger)
-	})
-
-	t.Run("cap past what was ingested", func(t *testing.T) {
-		f, release, err := openHotFixture(testLogger(), hotQueryOptions{
-			HotRoot: hotRoot, Chunk: chunkID, SampleLedgers: chunk.LedgersPerChunk,
-		})
-		require.NoError(t, err)
-		defer release()
-		assert.Equal(t, first+ingested-1, f.LastLedger, "a cap past the committed span is clamped")
-	})
+	}
 }
 
 func TestOpenHotFixtureRejectsMissingDatabase(t *testing.T) {
