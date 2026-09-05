@@ -246,4 +246,10 @@ func TestRunPacedLegRejectsBadArguments(t *testing.T) {
 	assert.Error(t, err)
 	_, err = runPacedLeg(t.Context(), 10, 0, 0, 1, req)
 	assert.Error(t, err)
+	// 1e-12 rps is one request per 1e12 s, an interval no Duration holds.
+	_, err = runPacedLeg(t.Context(), 1e-12, time.Second, 0, 1, req)
+	assert.ErrorContains(t, err, "too low")
+	// 1e6 rps over a century is more positions than an int32 counts.
+	_, err = runPacedLeg(t.Context(), 1e6, 100*365*24*time.Hour, 0, 1, req)
+	assert.ErrorContains(t, err, "more than")
 }

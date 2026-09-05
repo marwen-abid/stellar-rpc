@@ -142,6 +142,13 @@ func runPacedLeg(
 	if duration <= 0 {
 		return legResult{}, fmt.Errorf("paced leg needs a positive duration, got %v", duration)
 	}
+	if float64(time.Second)/rps > math.MaxInt64 {
+		return legResult{}, fmt.Errorf("paced leg rate %v is too low: its interval overflows a Duration", rps)
+	}
+	if rps*duration.Seconds() > math.MaxInt32 {
+		return legResult{}, fmt.Errorf("paced leg at %v rps for %v schedules more than %d requests",
+			rps, duration, math.MaxInt32)
+	}
 	warmup = max(warmup, 0)
 	measured := measuredRequests(rps, duration)
 	interval := time.Duration(float64(time.Second) / rps)
