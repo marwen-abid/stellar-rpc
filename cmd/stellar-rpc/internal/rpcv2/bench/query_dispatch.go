@@ -62,6 +62,8 @@ type legResult struct {
 // pacedLeg is one leg's dispatch state.
 type pacedLeg struct {
 	req   queryRequest
+	seed  int64
+	rps   float64
 	wg    sync.WaitGroup
 	slots chan struct{}
 
@@ -77,9 +79,11 @@ type pacedLeg struct {
 	errs     int
 }
 
-func newPacedLeg(req queryRequest, measured int) *pacedLeg {
+func newPacedLeg(req queryRequest, seed int64, rps float64, measured int) *pacedLeg {
 	return &pacedLeg{
 		req:     req,
+		seed:    seed,
+		rps:     rps,
 		slots:   make(chan struct{}, maxInFlight),
 		lags:    make([]time.Duration, 0, measured),
 		samples: make([]cellSample, 0, measured),
@@ -143,7 +147,7 @@ func runPacedLeg(
 	interval := time.Duration(float64(time.Second) / rps)
 	schedule := newPaceSchedule(interval, 0)
 
-	leg := newPacedLeg(req, measured)
+	leg := newPacedLeg(req, seed, rps, measured)
 	for pos := range warmup + measured {
 		if err := ctx.Err(); err != nil {
 			leg.wg.Wait()
@@ -154,7 +158,7 @@ func runPacedLeg(
 			leg.wg.Wait()
 			return legResult{}, err
 		}
-		leg.launch(legRNG(seed, pos, rps), due, pos >= warmup)
+		leg.launch(pos, due, pos >= warmup)
 	}
 	leg.wg.Wait()
 	res := leg.result(schedule.dueForPos(warmup))
@@ -162,10 +166,11 @@ func runPacedLeg(
 	return res, nil
 }
 
-// launch runs one request on its own goroutine when a slot is free and sheds
-// it otherwise. A measured position records its lag whether or not it is shed;
-// a warmup position records nothing. Called from the dispatch goroutine only.
-func (l *pacedLeg) launch(rng *rand.Rand, due time.Time, measured bool) {
+// launch runs position pos's request on its own goroutine when a slot is free
+// and sheds it otherwise. A measured position records its lag whether or not it
+// is shed; a warmup position records nothing. Called from the dispatch
+// goroutine only.
+func (l *pacedLeg) launch(pos int, due time.Time, measured bool) {
 	if measured {
 		l.lags = append(l.lags, max(time.Since(due), 0))
 	}
@@ -182,7 +187,7 @@ func (l *pacedLeg) launch(rng *rand.Rand, due time.Time, measured bool) {
 	}
 	l.wg.Go(func() {
 		defer func() { <-l.slots }()
-		s, err := l.req(rng)
+		s, err := l.req(legRNG(l.seed, pos, l.rps))
 		done := time.Now()
 		switch {
 		case !measured:

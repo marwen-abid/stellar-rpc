@@ -222,9 +222,9 @@ func TestLaunchPacedRequestChargesLateDispatch(t *testing.T) {
 		return timed("", func() (int, error) { return 1, nil })
 	}
 
-	leg := newPacedLeg(req, 1)
+	leg := newPacedLeg(req, 1, 1, 1)
 	due := time.Now().Add(-late)
-	leg.launch(legRNG(1, 0, 1), due, true)
+	leg.launch(0, due, true)
 	leg.wg.Wait()
 
 	res := leg.result(due)
