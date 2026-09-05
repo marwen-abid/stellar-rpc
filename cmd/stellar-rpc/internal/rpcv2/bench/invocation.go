@@ -75,10 +75,8 @@ func writeInvocationJSON(
 		Hostname:   hostname,
 		StartedAt:  startedAt.UTC().Format(time.RFC3339),
 		FinishedAt: finished,
+		Extra:      extra,
 		Error:      errMsg,
-	}
-	if len(extra) > 0 {
-		record.Extra = extra
 	}
 
 	data, err := json.MarshalIndent(record, "", "  ")
