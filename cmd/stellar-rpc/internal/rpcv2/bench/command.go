@@ -140,12 +140,13 @@ func newBenchCommand(
 			if err := os.MkdirAll(outDir, 0o755); err != nil {
 				return fmt.Errorf("create --out dir %s: %w", outDir, err)
 			}
-			if err := writeStartInvocationJSON(outDir, cmd, captureFlags(cmd), env.Extra, startedAt); err != nil {
+			flags := captureFlags(cmd)
+			if err := writeInvocationJSON(outDir, cmd, flags, env.Extra, startedAt, time.Time{}, nil); err != nil {
 				return err
 			}
 			runErr := prof.around(logger, func() error { return run(ctx, logger, env) })
 			if err := writeInvocationJSON(
-				outDir, cmd, captureFlags(cmd), env.Extra, startedAt, time.Now().UTC(), runErr,
+				outDir, cmd, flags, env.Extra, startedAt, time.Now().UTC(), runErr,
 			); err != nil {
 				if runErr == nil {
 					return err

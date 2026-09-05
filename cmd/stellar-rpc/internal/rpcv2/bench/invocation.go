@@ -39,17 +39,10 @@ type binaryInfo struct {
 	Branch         string `json:"branch"`
 }
 
-// writeStartInvocationJSON writes the record of a run in progress: no
-// finishedAt, no error.
-func writeStartInvocationJSON(
-	outDir string, cmd *cobra.Command, flags, extra map[string]string, startedAt time.Time,
-) error {
-	return writeInvocationJSON(outDir, cmd, flags, extra, startedAt, time.Time{}, nil)
-}
-
 // writeInvocationJSON writes an invocation record to outDir/invocation.json,
-// replacing any existing file. A zero finishedAt leaves the field out; a
-// non-nil runErr's message fills the error field.
+// replacing any existing file. A zero finishedAt leaves the field out, the
+// record of a run in progress; a non-nil runErr's message fills the error
+// field.
 func writeInvocationJSON(
 	outDir string,
 	cmd *cobra.Command,

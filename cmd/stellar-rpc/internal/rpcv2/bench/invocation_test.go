@@ -76,9 +76,9 @@ func TestCommandWritesInvocationBeforeTheRun(t *testing.T) {
 	assert.NotEmpty(t, record.FinishedAt)
 }
 
-// TestWriteStartInvocationJSON: the start record has no finishedAt and no
-// error key.
-func TestWriteStartInvocationJSON(t *testing.T) {
+// TestWriteInvocationJSONInProgress: a zero finishedAt writes a record with no
+// finishedAt and no error key.
+func TestWriteInvocationJSONInProgress(t *testing.T) {
 	outDir := t.TempDir()
 	parent := &cobra.Command{Use: "bench-query"}
 	cmd := &cobra.Command{Use: "cold"}
@@ -86,7 +86,7 @@ func TestWriteStartInvocationJSON(t *testing.T) {
 
 	flags := map[string]string{"cold-dir": "/bench/ds", "types": "ledgers,txhash"}
 	startedAt := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
-	require.NoError(t, writeStartInvocationJSON(outDir, cmd, flags, nil, startedAt))
+	require.NoError(t, writeInvocationJSON(outDir, cmd, flags, nil, startedAt, time.Time{}, nil))
 
 	data, err := os.ReadFile(filepath.Join(outDir, "invocation.json"))
 	require.NoError(t, err)
