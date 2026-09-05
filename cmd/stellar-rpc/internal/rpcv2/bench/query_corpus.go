@@ -311,9 +311,12 @@ func scanEventTerms(
 
 	for _, c := range chunks {
 		reader, rerr := view.Events(c)
-		if rerr != nil {
+		if errors.Is(rerr, query.ErrUnavailable) {
 			// A chunk may have no events store.
 			continue
+		}
+		if rerr != nil {
+			return nil, nil, fmt.Errorf("resolve events of chunk %s: %w", c, rerr)
 		}
 		for payload, perr := range reader.All(ctx) {
 			if perr != nil {
