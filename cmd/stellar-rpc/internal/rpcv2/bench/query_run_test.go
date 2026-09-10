@@ -43,31 +43,41 @@ func TestRecordQueryLegAccounting(t *testing.T) {
 	recordLeg(sink, queryTypeTxHash, 2, res)
 	out := mustWriteCSVs(t, sink)
 	driver := readCSV(t, filepath.Join(out, "driver.csv"))
+	accounting := readCSV(t, filepath.Join(out, "query-accounting.csv"))
+	require.Len(t, driver, 4)
+	require.Len(t, accounting, 10)
 	for _, tc := range []struct {
+		file     string
 		suffix   string
 		n, items int
 		total    int64
 	}{
-		{"", 1, 2, int64(4 * time.Second)},
-		{"_millirps", 1, 2, 1000},
-		{"_target_millirps", 1, 0, 2000},
-		{"_completion_millirps", 1, 0, 500},
-		{"_scheduled", 1, 4, 0},
-		{"_dispatched", 1, 3, 0},
-		{"_successful", 1, 2, 0},
-		{"_failed", 1, 1, 0},
-		{"_shed", 1, 1, 0},
-		{"_arrival", 1, 0, int64(2 * time.Second)},
-		{"_elapsed", 1, 0, int64(4 * time.Second)},
-		{"_drain", 1, 0, int64(2 * time.Second)},
-		{"_lag", 4, 4, int64(2 * time.Millisecond)},
+		{fileDriver, "", 1, 2, int64(4 * time.Second)},
+		{fileDriver, "_millirps", 1, 2, 1000},
+		{fileDriver, "_shed", 1, 1, 0},
+		{fileDriver, "_lag", 4, 4, int64(2 * time.Millisecond)},
+		{fileQueryAccounting, "_target_millirps", 1, 0, 2000},
+		{fileQueryAccounting, "_completion_millirps", 1, 0, 500},
+		{fileQueryAccounting, "_scheduled", 1, 4, 0},
+		{fileQueryAccounting, "_dispatched", 1, 3, 0},
+		{fileQueryAccounting, "_successful", 1, 2, 0},
+		{fileQueryAccounting, "_failed", 1, 1, 0},
+		{fileQueryAccounting, "_shed", 1, 1, 0},
+		{fileQueryAccounting, "_arrival", 1, 0, int64(2 * time.Second)},
+		{fileQueryAccounting, "_elapsed", 1, 0, int64(4 * time.Second)},
+		{fileQueryAccounting, "_drain", 1, 0, int64(2 * time.Second)},
 	} {
 		name := "txhash_r2" + tc.suffix
-		require.Contains(t, driver, name)
-		assert.EqualValues(t, tc.n, driver[name]["n"], name)
-		assert.EqualValues(t, tc.items, driver[name]["n_items"], name)
-		assert.Equal(t, tc.total, driver[name]["total_ns"], name)
+		rows := accounting
+		if tc.file == fileDriver {
+			rows = driver
+		}
+		require.Contains(t, rows, name)
+		assert.EqualValues(t, tc.n, rows[name]["n"], name)
+		assert.EqualValues(t, tc.items, rows[name]["n_items"], name)
+		assert.Equal(t, tc.total, rows[name]["total_ns"], name)
 	}
+	assert.Equal(t, driver["txhash_r2_shed"], accounting["txhash_r2_shed"])
 	latency := readCSV(t, filepath.Join(out, "txhash.csv"))
 	assert.EqualValues(t, 2, latency["total_r2"]["n"])
 	assert.EqualValues(t, 2, latency["service_r2"]["n"])
@@ -96,6 +106,7 @@ func TestRunQueryLegPreservesRequestFailures(t *testing.T) {
 			out := t.TempDir()
 			writePartialCSVs(logger, sink, out)
 			driver := readCSV(t, filepath.Join(out, "driver.csv"))
+			accounting := readCSV(t, filepath.Join(out, "query-accounting.csv"))
 			failed, successful := 2, 2
 			if allFailed {
 				failed, successful = 4, 0
@@ -104,12 +115,16 @@ func TestRunQueryLegPreservesRequestFailures(t *testing.T) {
 				latency := readCSV(t, filepath.Join(out, "ledgers.csv"))
 				assert.EqualValues(t, successful, latency["total_r1000"]["n"])
 			}
-			assert.EqualValues(t, 4, driver["ledgers_r1000_scheduled"]["n_items"])
-			assert.EqualValues(t, 4, driver["ledgers_r1000_dispatched"]["n_items"])
-			assert.EqualValues(t, successful, driver["ledgers_r1000_successful"]["n_items"])
-			assert.EqualValues(t, failed, driver["ledgers_r1000_failed"]["n_items"])
+			require.Len(t, accounting, 10)
+			assert.EqualValues(t, 4, accounting["ledgers_r1000_scheduled"]["n_items"])
+			assert.EqualValues(t, 4, accounting["ledgers_r1000_dispatched"]["n_items"])
+			assert.EqualValues(t, successful, accounting["ledgers_r1000_successful"]["n_items"])
+			assert.EqualValues(t, failed, accounting["ledgers_r1000_failed"]["n_items"])
 			assert.EqualValues(t, 1, driver["ledgers_r1000_shed"]["n"])
 			assert.EqualValues(t, 0, driver["ledgers_r1000_shed"]["n_items"])
+			assert.Equal(t, driver["ledgers_r1000_shed"], accounting["ledgers_r1000_shed"])
+			assert.EqualValues(t, successful, driver["ledgers_r1000_millirps"]["n_items"])
+			assert.EqualValues(t, successful, driver["ledgers_r1000"]["n_items"])
 			assert.Contains(t, output.String(), "outcome: scheduled=4 dispatched=4")
 			assert.Contains(t, output.String(), "PARTIAL CSVs")
 		})

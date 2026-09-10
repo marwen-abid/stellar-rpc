@@ -19,17 +19,24 @@ Failed and shed requests do not enter latency percentiles. A request failure
 fails the run, but its completed leg's counters and successful samples remain in
 the partial CSV report. Cancellation discards the interrupted leg.
 
-`driver.csv` reports scheduled, dispatched, successful, failed and shed counts
+`query-accounting.csv` reports scheduled, dispatched, successful, failed and shed counts
 in `n_items`. Scheduled equals dispatched plus shed; dispatched equals successful
 plus failed. Arrival is the measured position count times the pacing interval.
 Elapsed is `max(arrival, wall)`; drain is `max(wall - arrival, 0)`. Completion
-throughput is successful requests divided by elapsed seconds. All rate rows
+throughput is successful requests divided by elapsed seconds. This file also
+reports the target rate. All rate rows
 encode requests per second times 1000 in the duration columns, not nanoseconds.
 
-The legacy `_millirps` row remains for the results converter. It reports
-successful requests divided by arrival seconds, not completion throughput.
-Its `n_items`, and the legacy wall row's `n_items`, retain the successful count.
-New rate and window rows use `n_items=0`. Zero counts, rates, lag and drain are
+`driver.csv` keeps the legacy wall, `_millirps`, `_lag` and `_shed` rows with
+their existing formats and semantics. The results converter explicitly reads
+the query-type CSVs and `driver.csv`; it misclassifies unknown driver rows as
+setup. The separate accounting file preserves compatibility with that converter.
+The `_shed` row is duplicated in the accounting file to keep all counts together.
+
+The legacy `_millirps` row reports successful requests divided by arrival seconds,
+not completion throughput. Its `n_items`, and the wall row's `n_items`, retain
+the successful count. Rate and window rows in `query-accounting.csv` use
+`n_items=0`. Zero counts, rates, lag and drain are
 retained. Logs warn on shedding and fewer than 100 successful samples, including
 each `txhash` found/miss subgroup. This is a basic warning, not a statistical gate.
 

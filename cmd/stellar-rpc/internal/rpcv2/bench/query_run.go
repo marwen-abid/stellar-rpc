@@ -115,9 +115,10 @@ func legSeed(base int64, qtype string) int64 {
 // row the results converter reads) and service_r<rate> (service time); a
 // request carrying a stage lands in <stage>_r<rate> too.
 //
-// driver.csv records measured counts, arrival, elapsed and drain windows, and
-// target and completion rates. The legacy wall and _millirps window ratio keep
-// their successful-request n_items. Lag includes shed positions.
+// driver.csv records wall, the _millirps window ratio, lag and shed count.
+// Wall and _millirps keep their successful-request n_items. Lag includes shed
+// positions. query-accounting.csv records measured counts (including shed),
+// arrival, elapsed and drain windows, and target and completion rates.
 func recordLeg(sink *csvSink, qtype string, rps float64, res legResult) {
 	total := queryTotalRow(rps)
 	service := queryServiceRow(rps)
@@ -133,9 +134,10 @@ func recordLeg(sink *csvSink, qtype string, rps float64, res legResult) {
 	sink.observe(fileDriver, queryDriverRow(qtype, rps), res.wall, answered)
 	sink.observe(fileDriver, queryDriverLegRow(qtype, rps, driverLegRPSSuffix),
 		achievedMilliRPS(answered, res.offered), answered)
-	sink.observe(fileDriver, queryDriverLegRow(qtype, rps, driverLegTargetRPSSuffix),
+	sink.observe(fileDriver, queryDriverLegRow(qtype, rps, driverLegShedSuffix), 0, res.shed)
+	sink.observe(fileQueryAccounting, queryDriverLegRow(qtype, rps, driverLegTargetRPSSuffix),
 		time.Duration(math.Round(rps*milliPerUnit)), 0)
-	sink.observe(fileDriver, queryDriverLegRow(qtype, rps, driverLegCompletionRPSSuffix),
+	sink.observe(fileQueryAccounting, queryDriverLegRow(qtype, rps, driverLegCompletionRPSSuffix),
 		achievedMilliRPS(answered, res.elapsed), 0)
 	for _, counter := range []struct {
 		suffix string
@@ -147,7 +149,7 @@ func recordLeg(sink *csvSink, qtype string, rps float64, res legResult) {
 		{driverLegFailedSuffix, res.errs},
 		{driverLegShedSuffix, res.shed},
 	} {
-		sink.observe(fileDriver, queryDriverLegRow(qtype, rps, counter.suffix), 0, counter.count)
+		sink.observe(fileQueryAccounting, queryDriverLegRow(qtype, rps, counter.suffix), 0, counter.count)
 	}
 	for _, window := range []struct {
 		suffix string
@@ -157,7 +159,7 @@ func recordLeg(sink *csvSink, qtype string, rps float64, res legResult) {
 		{driverLegElapsedSuffix, res.elapsed},
 		{driverLegDrainSuffix, res.drain},
 	} {
-		sink.observe(fileDriver, queryDriverLegRow(qtype, rps, window.suffix), window.d, 0)
+		sink.observe(fileQueryAccounting, queryDriverLegRow(qtype, rps, window.suffix), window.d, 0)
 	}
 	for _, lag := range res.lags {
 		sink.observe(fileDriver, queryDriverLegRow(qtype, rps, driverLegLagSuffix), lag, 1)
