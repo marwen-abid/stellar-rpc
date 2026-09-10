@@ -258,7 +258,8 @@ func EventsLCMBytes(t *testing.T, seq uint32, evs ...xdr.ContractEvent) []byte {
 func EventsLCMBytesAt(t *testing.T, seq uint32, closeTimeUnix int64, evs ...xdr.ContractEvent) []byte {
 	t.Helper()
 	envelope, processing := successfulTx(t, evs)
-	return V2LCMBytes(t, seq, closeTimeUnix, []xdr.TransactionEnvelope{envelope}, []xdr.TransactionResultMetaV1{processing})
+	return V2LCMBytes(t, seq, closeTimeUnix,
+		[]xdr.TransactionEnvelope{envelope}, []xdr.TransactionResultMetaV1{processing})
 }
 
 // MultiTxLCMBytes returns the marshaled bytes of a LedgerCloseMeta (V2) for
