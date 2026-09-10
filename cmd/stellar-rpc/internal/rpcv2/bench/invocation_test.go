@@ -47,6 +47,63 @@ func TestCommandRecordsFailedRun(t *testing.T) {
 	assert.NotEmpty(t, record.FinishedAt)
 }
 
+// TestCommandWritesInvocationBeforeTheRun: a run that fails validation before
+// it would create --out still leaves invocation.json there.
+func TestCommandWritesInvocationBeforeTheRun(t *testing.T) {
+	outDir := filepath.Join(t.TempDir(), "csv")
+
+	cmd := NewCommand()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		"hot",
+		"--source", "bogus",
+		"--start-chunk", "0",
+		"--hot-dir", t.TempDir(),
+		"--out", outDir,
+	})
+	err := cmd.Execute()
+	require.ErrorContains(t, err, "--source=bogus")
+
+	data, readErr := os.ReadFile(filepath.Join(outDir, "invocation.json"))
+	require.NoError(t, readErr)
+	var record invocationRecord
+	require.NoError(t, json.Unmarshal(data, &record))
+	assert.Equal(t, "bench-ingest hot", record.Command)
+	assert.Equal(t, "bogus", record.Flags["source"])
+	assert.NotEmpty(t, record.StartedAt)
+	assert.Equal(t, err.Error(), record.Error)
+	assert.NotEmpty(t, record.FinishedAt)
+}
+
+// TestWriteInvocationJSONInProgress: a zero finishedAt writes a record with no
+// finishedAt and no error key.
+func TestWriteInvocationJSONInProgress(t *testing.T) {
+	outDir := t.TempDir()
+	parent := &cobra.Command{Use: "bench-query"}
+	cmd := &cobra.Command{Use: "cold"}
+	parent.AddCommand(cmd)
+
+	flags := map[string]string{"cold-dir": "/bench/ds", "types": "ledgers,txhash"}
+	startedAt := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	require.NoError(t, writeInvocationJSON(outDir, cmd, flags, nil, startedAt, time.Time{}, nil))
+
+	data, err := os.ReadFile(filepath.Join(outDir, "invocation.json"))
+	require.NoError(t, err)
+
+	var record invocationRecord
+	require.NoError(t, json.Unmarshal(data, &record))
+	assert.Equal(t, 1, record.SchemaVersion)
+	assert.Equal(t, "bench-query cold", record.Command)
+	assert.Equal(t, "2026-08-28T09:00:00Z", record.StartedAt)
+	assert.Equal(t, "/bench/ds", record.Flags["cold-dir"])
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.NotContains(t, raw, "finishedAt")
+	assert.NotContains(t, raw, "error")
+}
+
 // TestWriteInvocationJSON verifies that writeInvocationJSON produces a valid
 // invocation.json file with the expected schema and content.
 func TestWriteInvocationJSON(t *testing.T) {
@@ -66,7 +123,9 @@ func TestWriteInvocationJSON(t *testing.T) {
 	startedAt := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	finishedAt := time.Date(2026, 7, 21, 12, 5, 30, 0, time.UTC)
 
-	err := writeInvocationJSON(outDir, cmd, flags, startedAt, finishedAt, nil)
+	extra := map[string]string{"pageCacheEviction": "on"}
+
+	err := writeInvocationJSON(outDir, cmd, flags, extra, startedAt, finishedAt, nil)
 	require.NoError(t, err)
 
 	// Verify the file exists and is readable
@@ -88,6 +147,8 @@ func TestWriteInvocationJSON(t *testing.T) {
 	assert.Equal(t, "1000", record.Flags["start-chunk"])
 	assert.Contains(t, record.Flags, "num-chunks")
 	assert.Equal(t, "10", record.Flags["num-chunks"])
+
+	assert.Equal(t, "on", record.Extra["pageCacheEviction"])
 
 	// Verify timestamps
 	assert.Equal(t, "2026-07-21T12:00:00Z", record.StartedAt)
@@ -114,7 +175,7 @@ func TestWriteInvocationJSONWithError(t *testing.T) {
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 
 	runErr := errors.New("backfill [chunk 3, chunk 3]: boom")
-	require.NoError(t, writeInvocationJSON(outDir, cmd, nil, now, now, runErr))
+	require.NoError(t, writeInvocationJSON(outDir, cmd, nil, nil, now, now, runErr))
 
 	data, err := os.ReadFile(filepath.Join(outDir, "invocation.json"))
 	require.NoError(t, err)
@@ -123,6 +184,10 @@ func TestWriteInvocationJSONWithError(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &record))
 	assert.Equal(t, runErr.Error(), record.Error)
 	assert.Equal(t, 1, record.SchemaVersion)
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.NotContains(t, raw, "extra")
 }
 
 // TestCaptureFlags verifies that captureFlags extracts all flag values from

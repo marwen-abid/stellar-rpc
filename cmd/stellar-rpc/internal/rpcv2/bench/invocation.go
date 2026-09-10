@@ -23,7 +23,10 @@ type invocationRecord struct {
 	Binary        binaryInfo        `json:"binary"`
 	Hostname      string            `json:"hostname"`
 	StartedAt     string            `json:"startedAt"`
-	FinishedAt    string            `json:"finishedAt"`
+	// FinishedAt is absent while the run is in progress.
+	FinishedAt string `json:"finishedAt,omitempty"`
+	// Extra holds what the run put in runEnv.Extra. Absent when empty.
+	Extra map[string]string `json:"extra,omitempty"`
 	// Error carries a failed run's error message; absent on a successful run.
 	Error string `json:"error,omitempty"`
 }
@@ -36,14 +39,14 @@ type binaryInfo struct {
 	Branch         string `json:"branch"`
 }
 
-// writeInvocationJSON writes an invocation record as JSON to outDir/invocation.json.
-// startedAt and finishedAt should be UTC times. runErr is the run's outcome: nil
-// for a successful run, otherwise its message lands in the record's error field.
-// The JSON is formatted with indentation and a trailing newline.
+// writeInvocationJSON writes an invocation record to outDir/invocation.json,
+// replacing any existing file. A zero finishedAt leaves the field out, the
+// record of a run in progress; a non-nil runErr's message fills the error
+// field.
 func writeInvocationJSON(
 	outDir string,
 	cmd *cobra.Command,
-	flags map[string]string,
+	flags, extra map[string]string,
 	startedAt, finishedAt time.Time,
 	runErr error,
 ) error {
@@ -52,6 +55,11 @@ func writeInvocationJSON(
 	var errMsg string
 	if runErr != nil {
 		errMsg = runErr.Error()
+	}
+
+	var finished string
+	if !finishedAt.IsZero() {
+		finished = finishedAt.UTC().Format(time.RFC3339)
 	}
 
 	record := invocationRecord{
@@ -66,7 +74,8 @@ func writeInvocationJSON(
 		},
 		Hostname:   hostname,
 		StartedAt:  startedAt.UTC().Format(time.RFC3339),
-		FinishedAt: finishedAt.UTC().Format(time.RFC3339),
+		FinishedAt: finished,
+		Extra:      extra,
 		Error:      errMsg,
 	}
 

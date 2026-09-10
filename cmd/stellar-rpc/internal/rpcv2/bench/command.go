@@ -2,6 +2,8 @@ package bench
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -104,13 +106,25 @@ func writePartialCSVs(logger *supportlog.Entry, sink *csvSink, outDir string) {
 	}
 }
 
-// newBenchCommand builds one bench-ingest subcommand skeleton — no positional
-// args, SIGINT-canceled context, Info-level logger, profiling around run, an
-// invocation.json record written to --out after the run — with the source,
-// profile, and --out flags bound.
+// flagBinder is a flag group newBenchCommand binds onto a subcommand.
+type flagBinder interface {
+	bind(cmd *cobra.Command)
+}
+
+// runEnv is what newBenchCommand hands a run. Entries the run adds to Extra
+// land in invocation.json.
+type runEnv struct {
+	OutDir string
+	Extra  map[string]string
+}
+
+// newBenchCommand builds one bench subcommand: no positional args,
+// SIGINT-canceled context, Info-level logger, profiling around run, --out and
+// groups bound, invocation.json written to --out at start and at end.
 func newBenchCommand(
-	use, short string, src *sourceFlags, prof *profileFlags,
-	run func(ctx context.Context, logger *supportlog.Entry, outDir string) error,
+	use, short string, prof *profileFlags,
+	run func(ctx context.Context, logger *supportlog.Entry, env runEnv) error,
+	groups ...flagBinder,
 ) *cobra.Command {
 	var outDir string
 	cmd := &cobra.Command{
@@ -122,13 +136,17 @@ func newBenchCommand(
 			ctx, stop, logger := benchContext()
 			defer stop()
 			startedAt := time.Now().UTC()
-			runErr := prof.around(logger, func() error { return run(ctx, logger, outDir) })
-			// The --out dir is created by the run itself, so a run that
-			// failed early (e.g. in validation) leaves nowhere to write the
-			// record and this write fails too. In that case only warn about
-			// the write: the error the user needs to see is the run's own.
+			env := runEnv{OutDir: outDir, Extra: map[string]string{}}
+			if err := os.MkdirAll(outDir, 0o755); err != nil {
+				return fmt.Errorf("create --out dir %s: %w", outDir, err)
+			}
+			flags := captureFlags(cmd)
+			if err := writeInvocationJSON(outDir, cmd, flags, env.Extra, startedAt, time.Time{}, nil); err != nil {
+				return err
+			}
+			runErr := prof.around(logger, func() error { return run(ctx, logger, env) })
 			if err := writeInvocationJSON(
-				outDir, cmd, captureFlags(cmd), startedAt, time.Now().UTC(), runErr,
+				outDir, cmd, flags, env.Extra, startedAt, time.Now().UTC(), runErr,
 			); err != nil {
 				if runErr == nil {
 					return err
@@ -139,8 +157,10 @@ func newBenchCommand(
 		},
 	}
 	cmd.Flags().StringVar(&outDir, "out", "bench-out", "output dir for the CSV report and invocation.json")
-	src.bind(cmd)
 	prof.bind(cmd)
+	for _, g := range groups {
+		g.bind(cmd)
+	}
 	return cmd
 }
 
@@ -156,8 +176,8 @@ func newColdCommand() *cobra.Command {
 	)
 	cmd := newBenchCommand("cold",
 		"Benchmark cold ingestion: the daemon's backfill (chunk freezes + txhash index builds) over a chunk range",
-		&src, &prof,
-		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
+		&prof,
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			return runCold(ctx, logger, coldOptions{
 				Source:     src.config(),
 				StartChunk: chunk.ID(startChunk),
@@ -165,9 +185,9 @@ func newColdCommand() *cobra.Command {
 				Workers:    workers,
 				ColdRoot:   coldOutDir,
 				CatalogDir: catalogDir,
-				OutDir:     outDir,
+				OutDir:     env.OutDir,
 			})
-		})
+		}, &src)
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to backfill (required)")
 	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to backfill starting at --start-chunk")
@@ -194,8 +214,8 @@ func newHotCommand() *cobra.Command {
 	)
 	cmd := newBenchCommand("hot",
 		"Benchmark hot ingestion: the daemon's live ingestion loop over a chunk range",
-		&src, &prof,
-		func(ctx context.Context, logger *supportlog.Entry, outDir string) error {
+		&prof,
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			return runHot(ctx, logger, hotOptions{
 				Source:        src.config(),
 				StartChunk:    chunk.ID(startChunk),
@@ -204,9 +224,9 @@ func newHotCommand() *cobra.Command {
 				HotRoot:       hotDir,
 				CatalogDir:    catalogDir,
 				CloseInterval: closeInterval,
-				OutDir:        outDir,
+				OutDir:        env.OutDir,
 			})
-		})
+		}, &src)
 	fs := cmd.Flags()
 	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk ID to ingest (required)")
 	fs.IntVar(&numChunks, "num-chunks", 1,
