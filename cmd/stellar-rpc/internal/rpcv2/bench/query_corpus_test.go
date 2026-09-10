@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"strings"
@@ -121,7 +122,8 @@ func TestCorpusLogsItsLedgerCoverage(t *testing.T) {
 
 		info, warnings := buildCorpusCapturingLogs(t, f)
 		assert.Contains(t, info, "hashes over 8 ledgers spanning 2..9")
-		assert.Empty(t, warnings)
+		require.Len(t, warnings, 1)
+		assert.Contains(t, warnings[0], "txhash corpus underfilled:")
 	})
 
 	t.Run("one ledger", func(t *testing.T) {
@@ -130,8 +132,9 @@ func TestCorpusLogsItsLedgerCoverage(t *testing.T) {
 
 		info, warnings := buildCorpusCapturingLogs(t, f)
 		assert.Contains(t, info, "hashes over 1 ledgers spanning 2..2")
-		require.Len(t, warnings, 1)
+		require.Len(t, warnings, 2)
 		assert.Contains(t, warnings[0], "came from ledger 2 alone")
+		assert.Contains(t, warnings[1], "txhash corpus underfilled: 16 of 512 requested hashes")
 	})
 }
 
@@ -141,7 +144,7 @@ func buildCorpusCapturingLogs(t *testing.T, f *queryFixture) (string, []string) 
 	t.Helper()
 	logger := testLogger()
 	done := logger.StartTest(logrus.InfoLevel)
-	_, err := buildTxHashCorpus(context.Background(), logger, f, 0.1, defaultSeed)
+	_, err := buildTxHashCorpus(context.Background(), logger, f, 0.1, defaultSeed, 0)
 	entries := done()
 	require.NoError(t, err)
 
@@ -180,6 +183,58 @@ func TestVerifySampledHashReportsThePassphrase(t *testing.T) {
 		assert.Contains(t, err.Error(), "--network-passphrase")
 		assert.NotContains(t, err.Error(), "probe of a known transaction hash failed")
 	})
+}
+
+func TestBuildTxHashCorpusExactTarget(t *testing.T) {
+	f, release := openDenseHotFixture(t, 128, 32)
+	defer release()
+	view, err := f.view()
+	require.NoError(t, err)
+	defer view.Release()
+
+	for _, target := range []int{1, 7, 17, 0, 513, 1025} {
+		t.Run(fmt.Sprintf("target=%d", target), func(t *testing.T) {
+			want := target
+			if target == 0 {
+				want = corpusTargetHashes
+			}
+			first, err := buildTxHashCorpus(context.Background(), testLogger(), f, 0.25, defaultSeed, target)
+			require.NoError(t, err)
+			require.Len(t, first.hashes, want, "the last ledger must be trimmed to the exact target")
+			assert.Len(t, uniqueHashes(first.hashes), want)
+			assert.InDelta(t, 0.25, first.missFraction, 1e-12)
+			counts := hashesPerLedger(t, f, view, first.hashes)
+			assert.Equal(t, len(counts), first.ledgerCount, "metadata counts contributing ledgers")
+			assert.Equal(t, (want+15)/16, first.ledgerCount)
+			for seq, count := range counts {
+				assert.LessOrEqual(t, count, 16, "ledger %d", seq)
+			}
+			repeated, err := buildTxHashCorpus(context.Background(), testLogger(), f, 0.25, defaultSeed, target)
+			require.NoError(t, err)
+			assert.Equal(t, first, repeated, "the same seed reproduces hash order and metadata")
+			other, err := buildTxHashCorpus(context.Background(), testLogger(), f, 0.25, defaultSeed+1, target)
+			require.NoError(t, err)
+			assert.NotEqual(t, first.hashes, other.hashes)
+		})
+	}
+}
+
+func TestBuildTxHashCorpusUnderfilled(t *testing.T) {
+	f, release := openDenseHotFixture(t, 1, 3)
+	defer release()
+	logger := testLogger()
+	done := logger.StartTest(logrus.WarnLevel)
+	corpus, err := buildTxHashCorpus(context.Background(), logger, f, 0, defaultSeed, 17)
+	entries := done()
+	require.NoError(t, err)
+	assert.Len(t, corpus.hashes, 3)
+	assert.Equal(t, 1, corpus.ledgerCount)
+	assert.Contains(t, strings.Join(logMessages(entries, logrus.WarnLevel), "\n"),
+		"txhash corpus underfilled: 3 of 17 requested hashes")
+	view, err := f.view()
+	require.NoError(t, err)
+	defer view.Release()
+	assert.Equal(t, map[uint32]int{f.FirstLedger: 3}, hashesPerLedger(t, f, view, corpus.hashes))
 }
 
 func TestVerifySampledHashReportsAProbeFailure(t *testing.T) {

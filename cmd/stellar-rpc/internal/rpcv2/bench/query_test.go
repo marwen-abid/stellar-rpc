@@ -89,11 +89,12 @@ func TestQueryCommandAcceptsRunnerArgv(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 5*time.Second, duration)
 
-			warmup := sub.Flags().Lookup("warmup")
+			warmup, err := sub.Flags().GetInt("warmup")
+			require.NoError(t, err)
 			if tc.argv[0] == "cold" {
-				assert.Nil(t, warmup, "a cold leg evicts before it measures rather than warming")
+				assert.Zero(t, warmup)
 			} else {
-				assert.NotNil(t, warmup, "a hot leg warms the store's caches first")
+				assert.Equal(t, 20, warmup)
 			}
 		})
 	}
@@ -114,6 +115,17 @@ func TestQueryDefaultShapesMatchSLA(t *testing.T) {
 			eventsLimit, err := sub.Flags().GetInt("events-limit")
 			require.NoError(t, err)
 			require.Equal(t, 10, eventsLimit, "SLA: getEvents small page, 10 matches")
+
+			warmup, err := sub.Flags().GetInt("warmup")
+			require.NoError(t, err)
+			if name == "cold" {
+				assert.Zero(t, warmup)
+			} else {
+				assert.Equal(t, 20, warmup)
+			}
+			corpusSize, err := sub.Flags().GetInt("txhash-corpus-size")
+			require.NoError(t, err)
+			assert.Equal(t, 512, corpusSize)
 		})
 	}
 }
@@ -162,14 +174,24 @@ func TestQuerySpecs(t *testing.T) {
 		"the query types come first, in --types order, then driver.csv")
 	require.Equal(t, []string{"total_r0.5", "total_r2", "service_r0.5", "service_r2"}, byName["ledgers"])
 	require.Equal(t, []string{"total_r0.5", "total_r2", "service_r0.5", "service_r2"}, byName["events"])
-	require.Equal(t, []string{
-		"open", "evict",
-		"ledgers_r0.5", "ledgers_r0.5_millirps", "ledgers_r0.5_lag", "ledgers_r0.5_shed",
-		"ledgers_r2", "ledgers_r2_millirps", "ledgers_r2_lag", "ledgers_r2_shed",
-		"events_r0.5", "events_r0.5_millirps", "events_r0.5_lag", "events_r0.5_shed",
-		"events_r2", "events_r2_millirps", "events_r2_lag", "events_r2_shed",
-		"peak_rss_bytes",
-	}, byName["driver"])
+	wantDriver := append([]string{"open", "evict"}, expectedQueryDriverRows(
+		"ledgers_r0.5", "ledgers_r2", "events_r0.5", "events_r2",
+	)...)
+	wantDriver = append(wantDriver, "peak_rss_bytes")
+	require.Equal(t, wantDriver, byName["driver"])
+}
+
+func expectedQueryDriverRows(legs ...string) []string {
+	rows := make([]string, 0, 13*len(legs))
+	for _, leg := range legs {
+		for _, suffix := range []string{
+			"", "_millirps", "_lag", "_shed", "_target_millirps", "_completion_millirps",
+			"_scheduled", "_dispatched", "_successful", "_failed", "_arrival", "_elapsed", "_drain",
+		} {
+			rows = append(rows, leg+suffix)
+		}
+	}
+	return rows
 }
 
 func TestQuerySpecsTxHashStages(t *testing.T) {
@@ -203,6 +225,9 @@ func TestQuerySinkWritesContractRows(t *testing.T) {
 		lags:       []time.Duration{0, time.Millisecond},
 		offered:    legOffered,
 		wall:       legWall,
+		elapsed:    legOffered,
+		drain:      0,
+		scheduled:  2,
 		dispatched: 2,
 	}
 	for _, qtype := range types {
@@ -236,6 +261,7 @@ func TestQuerySinkWritesContractRows(t *testing.T) {
 			require.Contains(t, driver, millirps)
 			assert.Equal(t, wantMilliRPS, driver[millirps]["total_ns"])
 			assert.EqualValues(t, len(res.samples), driver[millirps]["n_items"])
+			assertLegDriverRows(t, driver, qtype, rps, int64(res.scheduled))
 		}
 	}
 
@@ -248,13 +274,10 @@ func TestQuerySinkWritesContractRows(t *testing.T) {
 		for i, r := range f.rows {
 			names[i] = r.name
 		}
-		require.Equal(t, []string{
-			"open",
-			"ledgers_r1", "ledgers_r1_millirps", "ledgers_r1_lag", "ledgers_r1_shed",
-			"ledgers_r4", "ledgers_r4_millirps", "ledgers_r4_lag", "ledgers_r4_shed",
-			"txhash_r1", "txhash_r1_millirps", "txhash_r1_lag", "txhash_r1_shed",
-			"txhash_r4", "txhash_r4_millirps", "txhash_r4_lag", "txhash_r4_shed",
-		}, names)
+		want := append([]string{"open"}, expectedQueryDriverRows(
+			"ledgers_r1", "ledgers_r4", "txhash_r1", "txhash_r4",
+		)...)
+		require.Equal(t, want, names)
 	}
 }
 
@@ -269,7 +292,10 @@ func TestRecordLegAllShed(t *testing.T) {
 	for i := range lags {
 		lags[i] = shedLag
 	}
-	recordLeg(sink, queryTypeLedgers, rps, legResult{lags: lags, shed: shedCount, offered: time.Second})
+	recordLeg(sink, queryTypeLedgers, rps, legResult{
+		lags: lags, scheduled: shedCount, shed: shedCount,
+		offered: 1250 * time.Millisecond, elapsed: 1250 * time.Millisecond, wall: 0, drain: 0,
+	})
 
 	outDir := t.TempDir()
 	written, err := sink.writeCSVs(outDir)
@@ -288,6 +314,19 @@ func TestRecordLegAllShed(t *testing.T) {
 	lag := queryDriverLegRow(queryTypeLedgers, rps, driverLegLagSuffix)
 	require.Contains(t, driver, lag)
 	assert.EqualValues(t, shedCount, driver[lag]["n"], "a shed position is charged a lag")
+	for suffix, want := range map[string]int64{
+		"_scheduled": shedCount, "_dispatched": 0, "_successful": 0, "_failed": 0,
+	} {
+		name := queryDriverLegRow(queryTypeLedgers, rps, suffix)
+		require.Contains(t, driver, name)
+		assert.Equal(t, want, driver[name]["n_items"])
+	}
+	for _, suffix := range []string{"_completion_millirps", "_drain"} {
+		name := queryDriverLegRow(queryTypeLedgers, rps, suffix)
+		require.Contains(t, driver, name)
+		assert.Zero(t, driver[name]["total_ns"])
+		assert.Zero(t, driver[name]["n_items"])
+	}
 
 	assert.NoFileExists(t, filepath.Join(outDir, queryTypeLedgers+".csv"))
 }
@@ -435,6 +474,10 @@ func assertQueryReport(t *testing.T, csvDir string, plan queryPlan) {
 			assert.Equal(t, measured, rows[service]["n"])
 
 			assertLegDriverRows(t, driver, qtype, rps, measured)
+			base := queryDriverRow(qtype, rps)
+			assert.Equal(t, measured, driver[base+"_successful"]["n_items"])
+			interval := time.Duration(float64(time.Second) / rps)
+			assert.Equal(t, measured*int64(interval), driver[base+"_arrival"]["total_ns"])
 		}
 		if qtype != queryTypeTxHash {
 			continue
@@ -448,29 +491,51 @@ func assertQueryReport(t *testing.T, csvDir string, plan queryPlan) {
 	}
 }
 
-// assertLegDriverRows checks the four driver rows of one leg: wall, achieved
-// rate, dispatch lag (one sample per measured position, shed included) and
-// shed count.
+// assertLegDriverRows checks measured counts, accounting windows and rate units.
 func assertLegDriverRows(
 	t *testing.T, driver map[string]map[string]int64, qtype string, rps float64, measured int64,
 ) {
 	t.Helper()
-	wall := queryDriverRow(qtype, rps)
-	require.Contains(t, driver, wall, "driver.csv is missing %s", wall)
-	assert.Positive(t, driver[wall]["total_ns"], "%s took no time", wall)
-
-	millirps := queryDriverLegRow(qtype, rps, driverLegRPSSuffix)
-	require.Contains(t, driver, millirps, "driver.csv is missing %s", millirps)
-	assert.Positive(t, driver[millirps]["total_ns"], "%s served nothing", millirps)
-	assert.Equal(t, driver[wall]["n_items"], driver[millirps]["n_items"])
-
-	lag := queryDriverLegRow(qtype, rps, driverLegLagSuffix)
-	require.Contains(t, driver, lag, "driver.csv is missing %s", lag)
-	assert.Equal(t, measured, driver[lag]["n"], "%s holds one sample per measured position", lag)
-
-	shed := queryDriverLegRow(qtype, rps, driverLegShedSuffix)
-	require.Contains(t, driver, shed, "driver.csv is missing %s", shed)
-	assert.EqualValues(t, 0, driver[shed]["n_items"], "%s: the fixture kept up", shed)
+	base := queryDriverRow(qtype, rps)
+	for _, name := range expectedQueryDriverRows(base) {
+		require.Contains(t, driver, name)
+		if name != base+"_lag" {
+			assert.EqualValues(t, 1, driver[name]["n"], name)
+		}
+	}
+	scheduled := driver[base+"_scheduled"]["n_items"]
+	dispatched := driver[base+"_dispatched"]["n_items"]
+	successful := driver[base+"_successful"]["n_items"]
+	assert.Equal(t, measured, scheduled)
+	assert.Equal(t, scheduled, dispatched+driver[base+"_shed"]["n_items"])
+	assert.Equal(t, dispatched, successful+driver[base+"_failed"]["n_items"])
+	assert.Equal(t, scheduled, driver[base+"_lag"]["n"])
+	assert.Equal(t, successful, driver[base]["n_items"])
+	assert.Equal(t, successful, driver[base+"_millirps"]["n_items"])
+	for _, suffix := range []string{"_scheduled", "_dispatched", "_successful", "_failed", "_shed"} {
+		assert.Zero(t, driver[base+suffix]["total_ns"], suffix)
+	}
+	wall := driver[base]["total_ns"]
+	arrival := driver[base+"_arrival"]["total_ns"]
+	elapsed := driver[base+"_elapsed"]["total_ns"]
+	require.Positive(t, arrival)
+	require.Positive(t, elapsed)
+	assert.Equal(t, max(arrival, wall), elapsed)
+	assert.Equal(t, max(wall-arrival, 0), driver[base+"_drain"]["total_ns"])
+	for _, suffix := range []string{
+		"_arrival", "_elapsed", "_drain", "_target_millirps", "_completion_millirps",
+	} {
+		assert.Zero(t, driver[base+suffix]["n_items"], suffix)
+	}
+	for suffix, want := range map[string]int64{
+		"_target_millirps":     int64(math.Round(rps * 1000)),
+		"_millirps":            int64(math.Round(float64(successful) / time.Duration(arrival).Seconds() * 1000)),
+		"_completion_millirps": int64(math.Round(float64(successful) / time.Duration(elapsed).Seconds() * 1000)),
+	} {
+		for _, column := range []string{"total_ns", "p50_ns", "p90_ns", "p99_ns", "max_ns"} {
+			assert.Equal(t, want, driver[base+suffix][column], "%s %s", suffix, column)
+		}
+	}
 }
 
 // ingestColdChunk runs bench-ingest cold over a synthetic pack and returns the
@@ -570,13 +635,18 @@ func logMessages(entries []logrus.Entry, level logrus.Level) []string {
 	return messages
 }
 
+const (
+	testEvictionRequested   = "requested"
+	testEvictionUnsupported = "unsupported-on-this-platform"
+)
+
 func TestEvictionStateRecordsPlatform(t *testing.T) {
 	assert.Equal(t, "off", evictionState(false))
 	if evictSupported {
-		assert.Equal(t, "on", evictionState(true))
+		assert.Equal(t, testEvictionRequested, evictionState(true))
 		return
 	}
-	assert.Equal(t, "unsupported-on-this-platform", evictionState(true))
+	assert.Equal(t, testEvictionUnsupported, evictionState(true))
 }
 
 func TestOpenColdFixtureRejectsMissingChunk(t *testing.T) {
