@@ -1,0 +1,355 @@
+package bench
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
+)
+
+func newQueryColdCommand() *cobra.Command {
+	var (
+		qf         = queryFlags{}
+		prof       profileFlags
+		startChunk uint32
+		numChunks  int
+		coldDir    string
+		evict      bool
+	)
+	cmd := newBenchCommand("cold",
+		"Benchmark cold reads: queries served from a chunk range's frozen artifacts",
+		&prof,
+		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
+			plan, err := qf.plan()
+			if err != nil {
+				return err
+			}
+			plan.Evict = evict
+			plan.Extra = env.Extra
+			env.Extra["pageCacheEviction"] = evictionState(evict)
+			env.Extra["cacheScenario"] = plan.cacheScenario()
+			return runQueryCold(ctx, logger, coldQueryOptions{
+				ColdRoot:   coldDir,
+				StartChunk: chunk.ID(startChunk),
+				NumChunks:  numChunks,
+				Plan:       plan,
+				OutDir:     env.OutDir,
+			})
+		}, &qf)
+	fs := cmd.Flags()
+	fs.Uint32Var(&startChunk, "start-chunk", 0, "first chunk to query (required)")
+	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to query starting at --start-chunk")
+	fs.StringVar(&coldDir, "cold-dir", "",
+		"root of the frozen artifact tree to query, as bench-ingest cold's --cold-out-dir laid it out (required)")
+	fs.BoolVar(&evict, "evict-page-cache", true,
+		"request OS page-cache eviction before each leg (Linux only)")
+	markRequired(cmd, "start-chunk", "cold-dir")
+	return cmd
+}
+
+// evictionState is what invocation.json records under pageCacheEviction.
+func evictionState(requested bool) string {
+	switch {
+	case !requested:
+		return "off"
+	case evictSupported:
+		return "requested"
+	default:
+		return "unsupported-on-this-platform"
+	}
+}
+
+// coldQueryOptions configures one cold read benchmark run.
+type coldQueryOptions struct {
+	// ColdRoot is the layout root of the frozen artifacts. The run creates and
+	// removes a scratch catalog under it.
+	ColdRoot string
+
+	// StartChunk and NumChunks give the chunk range [StartChunk, StartChunk+NumChunks).
+	StartChunk chunk.ID
+	NumChunks  int
+
+	// Plan is the validated flags.
+	Plan queryPlan
+
+	// OutDir receives the CSV report.
+	OutDir string
+}
+
+// validate checks the flags and the chunk range.
+func (o coldQueryOptions) validate() error {
+	if o.ColdRoot == "" {
+		return errors.New("--cold-dir is required")
+	}
+	if o.NumChunks < 1 {
+		return fmt.Errorf("--num-chunks must be >= 1, got %d", o.NumChunks)
+	}
+	// The frontier hot key (openColdFixture) sits one chunk above the range, so
+	// the range must end below maxChunkID. uint64: the sum must not wrap.
+	if end := uint64(o.StartChunk) + uint64(o.NumChunks) - 1; end >= uint64(maxChunkID) {
+		return fmt.Errorf("--start-chunk=%d with --num-chunks=%d ends at chunk %d, at or past the last valid chunk ID %d",
+			uint32(o.StartChunk), o.NumChunks, end, uint32(maxChunkID))
+	}
+	return nil
+}
+
+// runQueryCold benchmarks the cold read path: queries against the frozen
+// artifacts under --cold-dir.
+func runQueryCold(ctx context.Context, logger *supportlog.Entry, opts coldQueryOptions) error {
+	if err := opts.validate(); err != nil {
+		return err
+	}
+	return runQueryBench(ctx, logger, opts.Plan, opts.OutDir, func() (*queryFixture, func(), error) {
+		return openColdFixture(logger, opts)
+	})
+}
+
+// openColdFixture rebuilds the catalog state a frozen artifact tree implies and
+// returns the read fixture over it, plus its release.
+//
+// The tree has no catalog: bench-ingest cold discards its scratch catalog. Each
+// chunk in the range runs the freeze bracket for each kind on disk; the tx-hash
+// window index is committed under its own bracket, its coverage read from the
+// .idx filename; the chunk one past the range gets a "ready" hot key with no
+// handle. LastCompleteChunk is the highest ready hot chunk minus one, and
+// NewReadView fails without one; a hot key with no handle resolves to no tier.
+// Retention is full history from the range's first chunk; the latest ledger is
+// the range's last.
+func openColdFixture(logger *supportlog.Entry, opts coldQueryOptions) (*queryFixture, func(), error) {
+	layout := geometry.NewLayout(opts.ColdRoot)
+	cat, releaseCat, err := openScratchCatalog(opts.ColdRoot, scratchPrefixQuery, layout, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	release := releaseCat
+
+	chunks := chunkRange(opts.StartChunk, opts.NumChunks)
+	end := chunks[len(chunks)-1]
+	if err := freezeChunks(cat, layout, chunks); err != nil {
+		release()
+		return nil, nil, err
+	}
+	txHashRequested := slices.Contains(opts.Plan.Types, queryTypeTxHash)
+	if err := commitDiskTxHashIndex(logger, cat, layout, opts.StartChunk, end, txHashRequested); err != nil {
+		release()
+		return nil, nil, err
+	}
+	// The frontier: a ready hot chunk above the range, no dir, no handle.
+	if err := cat.FlipHotReady(end + 1); err != nil {
+		release()
+		return nil, nil, fmt.Errorf("mark frontier hot chunk %s ready: %w", end+1, err)
+	}
+
+	registry := query.NewRegistry(cat, geometry.NewRetention(0, opts.StartChunk))
+	registry.SetLatestLedger(end.LastLedger(), query.UnknownCloseTime())
+	// As startup.go does.
+	if err := adapters.SeedCloseTimes(registry); err != nil {
+		release()
+		return nil, nil, fmt.Errorf("seed close times: %w", err)
+	}
+	evictPaths, err := coldArtifactPaths(cat, layout, chunks)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	f := &queryFixture{
+		registry:    registry,
+		Passphrase:  opts.Plan.Passphrase,
+		Chunks:      chunks,
+		FirstLedger: opts.StartChunk.FirstLedger(),
+		LastLedger:  end.LastLedger(),
+		EvictPaths:  evictPaths,
+	}
+	if err := f.verifyServes(); err != nil {
+		release()
+		return nil, nil, err
+	}
+	return f, release, nil
+}
+
+// coldArtifactPaths lists every file the chunks are served from: each chunk's
+// frozen artifacts and the frozen tx-hash window indexes, read off the catalog.
+func coldArtifactPaths(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.ID) ([]string, error) {
+	var paths []string
+	for _, c := range chunks {
+		for _, kind := range geometry.AllKinds() {
+			state, err := cat.State(c, kind)
+			if err != nil {
+				return nil, fmt.Errorf("read the state of chunk %s %s: %w", c, kind, err)
+			}
+			if state != geometry.StateFrozen {
+				continue
+			}
+			paths = append(paths, layout.ArtifactPaths(c, kind)...)
+		}
+	}
+	covs, err := cat.AllTxHashIndexKeys()
+	if err != nil {
+		return nil, fmt.Errorf("list tx-hash index coverages: %w", err)
+	}
+	for _, cov := range covs {
+		if cov.State == geometry.StateFrozen {
+			paths = append(paths, layout.TxHashIndexFilePath(cov))
+		}
+	}
+	return paths, nil
+}
+
+// freezeChunks runs the freeze bracket over each chunk for the artifact kinds
+// on disk. A chunk with no ledger pack is an error.
+func freezeChunks(cat *catalog.Catalog, layout geometry.Layout, chunks []chunk.ID) error {
+	for _, c := range chunks {
+		var present []geometry.Kind
+		for _, kind := range geometry.AllKinds() {
+			if artifactOnDisk(layout, c, kind) {
+				present = append(present, kind)
+			}
+		}
+		if !slices.Contains(present, geometry.KindLedgers) {
+			return fmt.Errorf("chunk %s has no ledger pack under the layout (%s): the dataset does not cover it",
+				c, layout.LedgerPackPath(c))
+		}
+		if err := cat.MarkChunkFreezing(c, present...); err != nil {
+			return fmt.Errorf("mark chunk %s freezing: %w", c, err)
+		}
+		if err := cat.FlipChunkFrozen(c, present...); err != nil {
+			return fmt.Errorf("flip chunk %s frozen: %w", c, err)
+		}
+		cat.Logger().Infof("chunk %s frozen for kinds %s", c, kindList(present))
+	}
+	return nil
+}
+
+// artifactOnDisk reports whether every file of a (chunk, kind) artifact exists.
+func artifactOnDisk(layout geometry.Layout, c chunk.ID, kind geometry.Kind) bool {
+	paths := layout.ArtifactPaths(c, kind)
+	if len(paths) == 0 {
+		return false
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// kindList renders kinds for a log line.
+func kindList(kinds []geometry.Kind) string {
+	names := make([]string, len(kinds))
+	for i, k := range kinds {
+		names[i] = string(k)
+	}
+	return strings.Join(names, ",")
+}
+
+// commitDiskTxHashIndex commits the tx-hash window index covering [lo, hi]
+// under its freeze bracket. It must run after the chunks are frozen: a terminal
+// coverage demotes the per-chunk .bin keys it supersedes.
+//
+// With no index on disk, the open fails when --types includes txhash and warns
+// otherwise.
+func commitDiskTxHashIndex(
+	logger *supportlog.Entry, cat *catalog.Catalog, layout geometry.Layout, lo, hi chunk.ID,
+	txHashRequested bool,
+) error {
+	txLayout := cat.TxHashIndexLayout()
+	cov, ok, err := diskTxHashCoverage(layout, txLayout, lo, hi)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		if txHashRequested {
+			return fmt.Errorf(
+				"no tx-hash window index on disk covers chunks [%s, %s], and --types includes %s: "+
+					"expected an .idx file spanning that range in %s; ingest the range with a cold run that "+
+					"builds the index, or drop %s from --types",
+				lo, hi, queryTypeTxHash, layout.TxHashIndexDir(txLayout.TxHashIndexID(lo)), queryTypeTxHash)
+		}
+		logger.Warnf("no tx-hash window index on disk covers chunks [%s, %s]: cold by-hash lookups have nothing to probe",
+			lo, hi)
+		return nil
+	}
+	marked, err := cat.MarkTxHashIndexFreezing(cov.Index, cov.Lo, cov.Hi)
+	if err != nil {
+		return fmt.Errorf("mark tx-hash index %s freezing: %w", cov.Key, err)
+	}
+	if err := cat.CommitTxHashIndex(marked); err != nil {
+		return fmt.Errorf("commit tx-hash index %s: %w", marked.Key, err)
+	}
+	logger.Infof("tx-hash index %s covers chunks [%s, %s]", cov.Index, cov.Lo, cov.Hi)
+	return nil
+}
+
+// diskTxHashCoverage reads the widest window-index coverage on disk spanning
+// [lo, hi] off the {lo:08d}-{hi:08d}.idx filenames. Only the index containing
+// lo is searched; a range straddling two window indexes is an error.
+func diskTxHashCoverage(
+	layout geometry.Layout, txLayout geometry.TxHashIndexLayout, lo, hi chunk.ID,
+) (geometry.TxHashIndexCoverage, bool, error) {
+	idx := txLayout.TxHashIndexID(lo)
+	if txLayout.TxHashIndexID(hi) != idx {
+		return geometry.TxHashIndexCoverage{}, false,
+			fmt.Errorf("chunks [%s, %s] straddle two tx-hash window indexes; query one index's chunks at a time", lo, hi)
+	}
+	dir := layout.TxHashIndexDir(idx)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return geometry.TxHashIndexCoverage{}, false, nil
+		}
+		return geometry.TxHashIndexCoverage{}, false, fmt.Errorf("read tx-hash index dir %s: %w", dir, err)
+	}
+	var best geometry.TxHashIndexCoverage
+	found := false
+	for _, e := range entries {
+		covLo, covHi, ok := parseIndexFileName(e.Name())
+		if !ok || covLo > lo || covHi < hi {
+			continue
+		}
+		if !found || covHi > best.Hi {
+			best = geometry.TxHashIndexCoverage{
+				Index: idx, Lo: covLo, Hi: covHi,
+				Key:   geometry.TxHashIndexKey(idx, covLo, covHi),
+				State: geometry.StateFrozen,
+			}
+			found = true
+		}
+	}
+	return best, found, nil
+}
+
+// parseIndexFileName decodes a window index's {lo:08d}-{hi:08d}.idx basename,
+// the reverse of geometry.Layout.TxHashIndexFilePath.
+func parseIndexFileName(name string) (chunk.ID, chunk.ID, bool) {
+	stem, isIdx := strings.CutSuffix(filepath.Base(name), ".idx")
+	if !isIdx {
+		return 0, 0, false
+	}
+	loStr, hiStr, split := strings.Cut(stem, "-")
+	if !split {
+		return 0, 0, false
+	}
+	lo, err := geometry.ParsePadded(loStr)
+	if err != nil {
+		return 0, 0, false
+	}
+	hi, err := geometry.ParsePadded(hiStr)
+	if err != nil || hi < lo {
+		return 0, 0, false
+	}
+	return chunk.ID(lo), chunk.ID(hi), true
+}

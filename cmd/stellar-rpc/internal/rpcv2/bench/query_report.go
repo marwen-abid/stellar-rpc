@@ -11,17 +11,17 @@ const (
 	// queryTypeLedgers: ReadView.ScanLedgers, getLedgers' path.
 	queryTypeLedgers = "ledgers"
 	// queryTypeTxPage: getTransactions' paged ledger walk.
-	queryTypeTxPage = "txpage" //nolint:unused // consumed by bench-query/02-read-path, the next PR in this stack
+	queryTypeTxPage = "txpage"
 	// queryTypeTxHash: getTransaction's by-hash lookup, the MPHF candidate
 	// verified against the ledger.
 	queryTypeTxHash = "txhash"
 	// queryTypeEvents: ReadView.QueryEvents.
-	queryTypeEvents = "events" //nolint:unused // consumed by bench-query/02-read-path, the next PR in this stack
+	queryTypeEvents = "events"
 )
 
 // allQueryTypes is every --types value, in report order.
 //
-//nolint:gochecknoglobals,unused // fixed vocabulary, read-only; consumed by bench-query/02-read-path
+//nolint:gochecknoglobals // fixed vocabulary, read-only
 var allQueryTypes = []string{queryTypeLedgers, queryTypeTxPage, queryTypeTxHash, queryTypeEvents}
 
 // Query report row labels, the results converter's contract (see querySpecs).
