@@ -142,39 +142,46 @@ var fileSpecs = func() []fileSpec {
 }()
 
 // querySpecs is the bench-query report schema for one run over types and
-// rates. The external results converter consumes the existing latency, wall,
-// _millirps, _lag and _shed rows. The row contract is:
+// rates. The external results converter recognizes only wall, _millirps, _lag
+// and _shed as driver leg rows; other driver rows are classified as setup.
+// Keep the driver schema fixed and put completion accounting in its own file.
+// The row contract is:
 //
-//   - Every CSV other than driver.csv is one query type, named by basename.
+//   - Every CSV other than driver.csv and query-accounting.csv is one query
+//     type, named by basename.
 //   - total_r<rate> and service_r<rate> contain scheduled and service latency
 //     for successful measured requests only. found_r<rate> and miss_r<rate>
 //     contain the corresponding subsets. Failed and shed requests have no
 //     latency samples.
 //   - In driver.csv, <qtype>_r<rate> is wall: first measured due time to last
 //     measured completion, including errors; zero when nothing completed.
+//     _millirps is successful / arrival.Seconds() * 1000 in duration columns:
+//     a window ratio, not completion throughput. _lag contains dispatch lag
+//     for every measured position, including shed; _shed is the shed count.
+//   - query-accounting.csv has <qtype>_r<rate><suffix> rows for each leg.
+//     _target_millirps is the target rate * 1000; _completion_millirps is
+//     successful / elapsed.Seconds() * 1000, both in duration columns.
+//     _scheduled, _dispatched, _successful, _failed and a duplicate _shed store
+//     measured request counts in n_items with duration zero. scheduled =
+//     dispatched + shed; dispatched = successful + failed. Warmup is excluded.
 //     _arrival is scheduled * interval; _elapsed is max(arrival, wall), which
 //     includes the final arrival interval; _drain is max(wall - arrival, 0).
-//   - _scheduled, _dispatched, _successful, _failed and _shed store measured
-//     request counts in n_items with duration zero. scheduled = dispatched +
-//     shed; dispatched = successful + failed. Warmup is excluded.
-//   - Rate rows store requests/second * 1000 in the duration columns:
-//     _target_millirps is the target, _completion_millirps is successful /
-//     elapsed.Seconds(), and _millirps is successful / arrival.Seconds().
-//     The latter is a window ratio, not completion throughput.
-//   - _lag contains dispatch lag for every measured position, including shed.
-//     Zero lag, drain, rate and count observations are retained. Scalar rows
+//   - In driver.csv and query-accounting.csv,
+//     zero lag, drain, rate and count observations are retained. Scalar rows
 //     have n=1; n_items is zero for rate, _arrival, _elapsed and _drain rows.
 //   - A driver row with no _r<rate> segment (open, evict, peak_rss_bytes) is
 //     setup.
 func querySpecs(types []string, rates []float64) []fileSpec {
-	specs := make([]fileSpec, 0, len(types)+1)
-	legSuffixes := []string{
-		driverLegRPSSuffix, driverLegLagSuffix, driverLegShedSuffix,
+	specs := make([]fileSpec, 0, len(types)+2)
+	legSuffixes := []string{driverLegRPSSuffix, driverLegLagSuffix, driverLegShedSuffix}
+	accountingSuffixes := []string{
 		driverLegTargetRPSSuffix, driverLegCompletionRPSSuffix,
 		driverLegScheduledSuffix, driverLegDispatchedSuffix, driverLegSuccessSuffix, driverLegFailedSuffix,
+		driverLegShedSuffix,
 		driverLegOfferedSuffix, driverLegElapsedSuffix, driverLegDrainSuffix,
 	}
 	driverRows := make([]string, 0, len(types)*len(rates)*(len(legSuffixes)+1)+3)
+	accountingRows := make([]string, 0, len(types)*len(rates)*len(accountingSuffixes))
 	driverRows = append(driverRows, driverQueryOpen, driverQueryEvict)
 	for _, qtype := range types {
 		rows := make([]string, 0, len(rates)*2)
@@ -196,11 +203,17 @@ func querySpecs(types []string, rates []float64) []fileSpec {
 			for _, suffix := range legSuffixes {
 				driverRows = append(driverRows, queryDriverLegRow(qtype, rps, suffix))
 			}
+			for _, suffix := range accountingSuffixes {
+				accountingRows = append(accountingRows, queryDriverLegRow(qtype, rps, suffix))
+			}
 		}
 		specs = append(specs, fileSpec{name: qtype, rowOrder: rows})
 	}
 	driverRows = append(driverRows, driverPeakRSS)
-	return append(specs, fileSpec{name: fileDriver, rowOrder: driverRows})
+	return append(specs,
+		fileSpec{name: fileDriver, rowOrder: driverRows},
+		fileSpec{name: fileQueryAccounting, rowOrder: accountingRows},
+	)
 }
 
 // sample is one observed (duration, item-count) pair.
@@ -491,11 +504,11 @@ func withUnknown[V any](order []string, m map[string]V) []string {
 }
 
 // keepsZeroSamples reports whether a row's zero-duration samples are real
-// observations (on-time dispatch, counts, zero rate or drain) and are kept. Only
-// driver.csv has such rows; it matches them by suffix, and the ingest report's
-// pace_lag ends in _lag.
+// observations (on-time dispatch, counts, zero rate or drain) and are kept.
+// driver.csv and query-accounting.csv match them by suffix; the ingest report's
+// pace_lag ends in _lag. Per-query CSVs exclude zero-duration samples.
 func keepsZeroSamples(file, label string) bool {
-	return file == fileDriver && (strings.HasSuffix(label, driverLegLagSuffix) ||
+	return (file == fileDriver || file == fileQueryAccounting) && (strings.HasSuffix(label, driverLegLagSuffix) ||
 		driverLegCountSuffix(label) != "" ||
 		strings.HasSuffix(label, driverLegDrainSuffix) ||
 		strings.HasSuffix(label, driverLegRPSSuffix))
@@ -611,11 +624,11 @@ func (s *csvSink) logSummary(logger *supportlog.Entry) {
 	}
 }
 
-// logRow logs one aggregated row with units for driver rates and counts.
+// logRow logs one aggregated row with units for driver and accounting metrics.
 func logRow(logger *supportlog.Entry, fileName string, r row) {
-	if fileName == fileDriver {
+	if fileName == fileDriver || fileName == fileQueryAccounting {
 		switch {
-		case r.name == driverPeakRSS:
+		case fileName == fileDriver && r.name == driverPeakRSS:
 			logger.Infof("%-10s %-12s n=%-7d bytes=%d", fileName, r.name, r.n, r.total.Nanoseconds())
 			return
 		case strings.HasSuffix(r.name, driverLegTargetRPSSuffix),

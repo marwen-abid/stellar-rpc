@@ -2,6 +2,9 @@ package bench
 
 import "strconv"
 
+// fileQueryAccounting holds per-leg rates, request counts and timing windows.
+const fileQueryAccounting = "query-accounting"
+
 // Query types, in report order. Each is a --types value and a report CSV
 // basename (see querySpecs).
 const (
@@ -64,7 +67,7 @@ func queryStageRow(stage string, rps float64) string { return stage + "_r" + for
 // queryDriverRow is driver.csv's wall-clock row for one query type's leg at rps.
 func queryDriverRow(qtype string, rps float64) string { return qtype + "_r" + formatRPS(rps) }
 
-// queryDriverLegRow is driver.csv's row for one leg metric, named by suffix.
+// queryDriverLegRow names one leg metric in driver.csv or query-accounting.csv.
 func queryDriverLegRow(qtype string, rps float64, suffix string) string {
 	return queryDriverRow(qtype, rps) + suffix
 }
