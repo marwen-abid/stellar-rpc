@@ -151,11 +151,11 @@ func (s *txHashSampler) sampleChunk(view *query.ReadView, c chunk.ID, first, las
 	}
 
 	span := int(hi - lo + 1)
-	// Allow 16 draws per needed ledger, with a floor of 512 and a span cap.
+	// Allow 16 draws per needed ledger, with a floor of 512.
 	// Draws can repeat, so exhausting this budget need not fill the pool.
 	needed := min(s.target-len(s.hashes), maxTxHashCorpusSize)
-	maxLedgerReads := min(span, max(corpusMaxLedgerReads,
-		((needed+corpusMaxHashesPerLedger-1)/corpusMaxHashesPerLedger)*16))
+	maxLedgerReads := max(corpusMaxLedgerReads,
+		((needed+corpusMaxHashesPerLedger-1)/corpusMaxHashesPerLedger)*16)
 	for reads := 0; reads < maxLedgerReads && len(s.hashes) < s.target; reads++ {
 		seq := lo + uint32(s.rng.IntN(span)) //nolint:gosec // span <= LedgersPerChunk
 		if _, drawn := s.read[seq]; drawn {

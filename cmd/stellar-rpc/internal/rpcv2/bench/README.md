@@ -58,7 +58,7 @@ the data was cold when measurement began.
 best-effort cap. Sampling uses seeded random ledger draws with proportional
 chunk targets, at most 16 hashes per ledger, and trims to the remaining target.
 Each chunk's draw budget is at least 512 or 16 times the ledgers needed at 16
-hashes each, capped by the chunk's sampled span. Empty data and repeated draws
+hashes each. Empty data and repeated draws
 can leave the pool underfilled; this produces a warning. Zero hashes is an error.
 
 Invocation extras `txhashCorpusHashes` and `txhashCorpusLedgers` record actual
