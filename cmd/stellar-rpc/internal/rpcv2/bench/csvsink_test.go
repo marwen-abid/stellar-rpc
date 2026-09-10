@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
@@ -291,13 +294,109 @@ func TestKeepsZeroSamples(t *testing.T) {
 		{fileDriver, "txhash_r300_lag", true},
 		{fileDriver, "events_r0.5_shed", true},
 		{fileDriver, "ledgers_r1_millirps", true},
+		{fileDriver, "ledgers_r1_target_millirps", true},
+		{fileDriver, "ledgers_r1_completion_millirps", true},
+		{fileDriver, "ledgers_r1_scheduled", true},
+		{fileDriver, "ledgers_r1_dispatched", true},
+		{fileDriver, "ledgers_r1_successful", true},
+		{fileDriver, "ledgers_r1_failed", true},
+		{fileDriver, "ledgers_r1_drain", true},
 		{fileDriver, "ledgers_r1", false},
 		{fileDriver, "open", false},
 		{queryTypeLedgers, "total_r1_lag", false},
 		{fileHot, "commit_lag", false},
+		{queryTypeLedgers, "total_r1_failed", false},
+		{queryTypeLedgers, "total_r1_drain", false},
 	} {
 		assert.Equal(t, tc.want, keepsZeroSamples(tc.file, tc.label), "keepsZeroSamples(%q, %q)", tc.file, tc.label)
 	}
+}
+
+func TestLogQueryDriverRows(t *testing.T) {
+	for _, tc := range []struct {
+		suffix string
+		d      time.Duration
+		items  int
+		want   string
+	}{
+		{driverLegRPSSuffix, 1250, 0, "window_rps=1.250"},
+		{driverLegTargetRPSSuffix, 2000, 0, "rps=2.000"},
+		{driverLegCompletionRPSSuffix, 750, 0, "rps=0.750"},
+		{driverLegScheduledSuffix, 0, 3, "scheduled=3"},
+		{driverLegDispatchedSuffix, 0, 2, "dispatched=2"},
+		{driverLegSuccessSuffix, 0, 1, "successful=1"},
+		{driverLegFailedSuffix, 0, 1, "failed=1"},
+		{driverLegShedSuffix, 0, 1, "shed=1"},
+		{driverLegDrainSuffix, 0, 0, "total=0s"},
+	} {
+		t.Run(tc.suffix, func(t *testing.T) {
+			var output bytes.Buffer
+			logger := supportlog.New()
+			logger.SetLevel(supportlog.InfoLevel)
+			logger.SetOutput(&output)
+			r := row{name: queryDriverLegRow(queryTypeLedgers, 2, tc.suffix), n: 1, total: tc.d, items: tc.items}
+			logRow(logger, fileDriver, r)
+			assert.Contains(t, output.String(), tc.want)
+			if tc.suffix == driverLegTargetRPSSuffix || tc.suffix == driverLegCompletionRPSSuffix {
+				assert.NotContains(t, output.String(), "window_rps")
+			}
+			output.Reset()
+			logRow(logger, queryTypeLedgers, r)
+			assert.Contains(t, output.String(), "total=")
+			assert.NotContains(t, output.String(), "rps=")
+		})
+	}
+}
+
+func TestQueryDriverSchema(t *testing.T) {
+	specs := querySpecs([]string{queryTypeLedgers}, []float64{10})
+	wantRows := []string{
+		"open", "evict", "ledgers_r10", "ledgers_r10_millirps", "ledgers_r10_lag", "ledgers_r10_shed",
+		"ledgers_r10_target_millirps", "ledgers_r10_completion_millirps",
+		"ledgers_r10_scheduled", "ledgers_r10_dispatched", "ledgers_r10_successful", "ledgers_r10_failed",
+		"ledgers_r10_arrival", "ledgers_r10_elapsed", "ledgers_r10_drain", "peak_rss_bytes",
+	}
+	require.Len(t, specs, 2)
+	assert.Equal(t, wantRows, specs[1].rowOrder)
+	sink := newSchemaCSVSink(specs)
+	// Record in reverse order to verify schema ordering as well as zero retention.
+	for i := len(wantRows) - 2; i >= 2; i-- {
+		name := wantRows[i]
+		d, items := time.Duration(0), 0
+		switch name {
+		case "ledgers_r10", "ledgers_r10_arrival", "ledgers_r10_elapsed":
+			d = time.Second
+		case "ledgers_r10_target_millirps":
+			d = 10 * milliPerUnit
+		case "ledgers_r10_scheduled", "ledgers_r10_dispatched", "ledgers_r10_failed":
+			items = 10
+		}
+		sink.observe(fileDriver, name, d, items)
+	}
+	files := sink.files()
+	require.Len(t, files, 1)
+	names := make([]string, 0, len(files[0].rows))
+	for _, r := range files[0].rows {
+		names = append(names, r.name)
+	}
+	assert.Equal(t, wantRows[2:len(wantRows)-1], names)
+	driver := readCSV(t, filepath.Join(mustWriteCSVs(t, sink), "driver.csv"))
+	for _, name := range names {
+		assert.EqualValues(t, 1, driver[name]["n"], name)
+	}
+	for _, name := range []string{"scheduled", "dispatched", "failed", "successful", "shed"} {
+		r := driver["ledgers_r10_"+name]
+		want := 10
+		if name == "successful" || name == "shed" {
+			want = 0
+		}
+		assert.EqualValues(t, want, r["n_items"], name)
+		assert.Zero(t, r["total_ns"], name)
+	}
+	assert.EqualValues(t, 10*milliPerUnit, driver["ledgers_r10_target_millirps"]["total_ns"])
+	assert.Zero(t, driver["ledgers_r10_completion_millirps"]["total_ns"])
+	assert.Zero(t, driver["ledgers_r10_millirps"]["total_ns"])
+	assert.Zero(t, driver["ledgers_r10_drain"]["total_ns"])
 }
 
 // mustWriteCSVs writes the sink's report to a temp dir and returns it.

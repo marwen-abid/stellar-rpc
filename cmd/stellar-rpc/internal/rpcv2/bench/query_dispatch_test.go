@@ -3,6 +3,7 @@ package bench
 import (
 	"context"
 	"errors"
+	"math"
 	"math/rand/v2"
 	"slices"
 	"sync"
@@ -39,6 +40,7 @@ func TestRunPacedLegMeasuredCount(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 20, res.dispatched)
+	assert.Equal(t, 20, res.scheduled)
 	assert.Len(t, res.samples, 20)
 	assert.Len(t, res.lags, 20)
 	assert.Equal(t, 0, res.shed)
@@ -46,6 +48,8 @@ func TestRunPacedLegMeasuredCount(t *testing.T) {
 	assert.Equal(t, int64(25), fake.calls.Load(), "warmup requests run at the leg's rate")
 	assert.Positive(t, res.wall)
 	assert.Equal(t, offeredWindow(rps, res), res.offered)
+	assert.Equal(t, max(res.offered, res.wall), res.elapsed)
+	assert.Equal(t, max(res.wall-res.offered, 0), res.drain)
 
 	for i, s := range res.samples {
 		assert.Positive(t, s.service, "sample %d", i)
@@ -126,6 +130,8 @@ func TestRunPacedLegSheds(t *testing.T) {
 	assert.Equal(t, maxInFlight, res.dispatched)
 	assert.Equal(t, 1000-maxInFlight, res.shed)
 	assert.Equal(t, 1000, res.dispatched+res.shed)
+	assert.Equal(t, res.scheduled, res.dispatched+res.shed)
+	assert.Equal(t, res.dispatched, len(res.samples)+res.errs)
 	assert.Len(t, res.samples, maxInFlight)
 	assert.Len(t, res.lags, 1000, "every measured position is charged a dispatch lag")
 	assert.Equal(t, int64(maxInFlight), fake.calls.Load())
@@ -149,6 +155,8 @@ func TestRunPacedLegCountsErrors(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 20, res.dispatched)
+	assert.Equal(t, res.scheduled, res.dispatched+res.shed)
+	assert.Equal(t, res.dispatched, len(res.samples)+res.errs)
 	assert.Equal(t, 10, res.errs)
 	assert.Len(t, res.samples, 10)
 	assert.Len(t, res.lags, 20)
@@ -252,4 +260,92 @@ func TestRunPacedLegRejectsBadArguments(t *testing.T) {
 	// 1e6 rps over a century is more positions than an int32 counts.
 	_, err = runPacedLeg(t.Context(), 1e6, 100*365*24*time.Hour, 0, 1, req)
 	assert.ErrorContains(t, err, "more than")
+}
+
+func TestRunPacedLegRejectsScheduleOverflow(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		rps      float64
+		duration time.Duration
+		warmup   int
+		want     string
+	}{
+		{"sub-nanosecond interval", 1e9 + 1, time.Nanosecond, 0, "less than 1ns"},
+		{"duration conversion boundary", float64(time.Second) / float64(math.MaxInt64), time.Second, 0, "too low"},
+		{"position count", 1, time.Second, math.MaxInt, "count overflows"},
+		{"warmup window", 0.1, time.Second, int(math.MaxInt32), "schedule overflows"},
+		{"measured window", 2e-10, time.Duration(math.MaxInt64), 0, "schedule overflows"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := runPacedLeg(t.Context(), tc.rps, tc.duration, tc.warmup, 1, nil)
+			require.ErrorContains(t, err, tc.want)
+			assert.Equal(t, legResult{}, res)
+		})
+	}
+}
+
+func TestRunPacedLegNanosecondInterval(t *testing.T) {
+	for _, rps := range []float64{math.Nextafter(1e9, 0), 1e9} {
+		t.Run(formatRPS(rps), func(t *testing.T) {
+			req := func(*rand.Rand) (cellSample, error) { return cellSample{items: 1}, nil }
+			res, err := runPacedLeg(t.Context(), rps, time.Nanosecond, 0, 1, req)
+			require.NoError(t, err)
+			assert.Equal(t, 1, res.scheduled)
+			assert.Equal(t, 1, res.dispatched)
+			assert.Len(t, res.samples, 1)
+			assert.Zero(t, res.shed)
+			assert.Zero(t, res.errs)
+			assert.Equal(t, time.Nanosecond, res.offered)
+			assert.Equal(t, max(res.offered, res.wall), res.elapsed)
+			assert.Equal(t, max(res.wall-res.offered, 0), res.drain)
+		})
+	}
+}
+
+func TestPacedLegAccountingWindows(t *testing.T) {
+	const interval = 10 * time.Millisecond
+	firstDue := time.Unix(1, 0)
+	for _, tc := range []struct {
+		name          string
+		success, fail time.Duration
+		wall, drain   time.Duration
+	}{
+		{"before end", 15 * time.Millisecond, 0, 15 * time.Millisecond, 0},
+		{"at end", 20 * time.Millisecond, 0, 20 * time.Millisecond, 0},
+		{"after end", 35 * time.Millisecond, 0, 35 * time.Millisecond, 15 * time.Millisecond},
+		{"error finishes last", 15 * time.Millisecond, 40 * time.Millisecond, 40 * time.Millisecond, 20 * time.Millisecond},
+		{"success finishes last", 40 * time.Millisecond, 15 * time.Millisecond, 40 * time.Millisecond, 20 * time.Millisecond},
+		{"all errors", 0, 40 * time.Millisecond, 40 * time.Millisecond, 20 * time.Millisecond},
+		{"all shed", 0, 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			leg := newPacedLeg(nil, 1, 100, 2)
+			if tc.success > 0 {
+				leg.recordSample(cellSample{}, firstDue.Add(tc.success))
+				leg.dispatched++
+			}
+			if tc.fail > 0 {
+				for leg.dispatched < 2 {
+					leg.recordError(firstDue.Add(tc.fail))
+					leg.dispatched++
+				}
+			}
+			// Fill all slots so the remaining positions are deterministically shed.
+			for range maxInFlight {
+				leg.slots <- struct{}{}
+			}
+			for pos := leg.dispatched; pos < 2; pos++ {
+				leg.launch(pos, firstDue.Add(time.Duration(pos)*interval), firstDue, true)
+			}
+			res := leg.result(firstDue)
+			res.finish(2, interval)
+			assert.Equal(t, 2, res.scheduled)
+			assert.Equal(t, res.scheduled, res.dispatched+res.shed)
+			assert.Equal(t, res.dispatched, len(res.samples)+res.errs)
+			assert.Equal(t, 2*interval, res.offered)
+			assert.Equal(t, tc.wall, res.wall)
+			assert.Equal(t, 2*interval+tc.drain, res.elapsed)
+			assert.Equal(t, tc.drain, res.drain)
+		})
+	}
 }

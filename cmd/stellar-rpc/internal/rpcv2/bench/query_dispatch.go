@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -41,22 +42,36 @@ const (
 
 // legResult is one paced leg's outcome.
 type legResult struct {
-	// samples holds the measured requests that answered.
+	// samples holds the measured requests that succeeded.
 	samples []cellSample
 	// lags holds one dispatch lag per measured position, shed positions
 	// included.
 	lags []time.Duration
-	// offered is measured positions × interval, the denominator of the
-	// achieved rate.
+	// offered is measured positions * interval, the effective arrival window.
 	offered time.Duration
 	// wall spans the first measured due time to the last measured completion.
+	// It is zero if no measured request completed; errors count as completions.
 	wall time.Duration
+	// elapsed is max(offered, wall), including the final arrival interval.
+	elapsed time.Duration
+	// drain is max(wall - offered, 0), completion time beyond the arrival window.
+	drain time.Duration
+	// scheduled is the planned number of measured positions.
+	scheduled int
 	// dispatched counts the measured requests that ran.
 	dispatched int
 	// shed counts the measured requests dropped at a full maxInFlight.
 	shed int
 	// errs counts the measured requests that returned an error.
 	errs int
+}
+
+// finish sets the accounting window after the full schedule and all requests finish.
+func (r *legResult) finish(measured int, interval time.Duration) {
+	r.scheduled = measured
+	r.offered = time.Duration(measured) * interval
+	r.elapsed = max(r.offered, r.wall)
+	r.drain = max(r.wall-r.offered, 0)
 }
 
 // pacedLeg is one leg's dispatch state.
@@ -142,7 +157,11 @@ func runPacedLeg(
 	if duration <= 0 {
 		return legResult{}, fmt.Errorf("paced leg needs a positive duration, got %v", duration)
 	}
-	if float64(time.Second)/rps > math.MaxInt64 {
+	intervalNS := float64(time.Second) / rps
+	if intervalNS < 1 {
+		return legResult{}, fmt.Errorf("paced leg rate %v is too high: its interval is less than 1ns", rps)
+	}
+	if intervalNS >= float64(math.MaxInt64) {
 		return legResult{}, fmt.Errorf("paced leg rate %v is too low: its interval overflows a Duration", rps)
 	}
 	if rps*duration.Seconds() > math.MaxInt32 {
@@ -151,7 +170,13 @@ func runPacedLeg(
 	}
 	warmup = max(warmup, 0)
 	measured := measuredRequests(rps, duration)
-	interval := time.Duration(float64(time.Second) / rps)
+	interval := time.Duration(intervalNS)
+	if warmup > math.MaxInt-measured {
+		return legResult{}, errors.New("paced leg warmup plus measured request count overflows an int")
+	}
+	if int64(warmup+measured) > math.MaxInt64/int64(interval) {
+		return legResult{}, errors.New("paced leg schedule overflows a Duration")
+	}
 	schedule := newPaceSchedule(interval, 0)
 
 	leg := newPacedLeg(req, seed, rps, measured)
@@ -169,7 +194,7 @@ func runPacedLeg(
 	}
 	leg.wg.Wait()
 	res := leg.result(schedule.dueForPos(warmup))
-	res.offered = time.Duration(measured) * interval
+	res.finish(measured, interval)
 	return res, nil
 }
 

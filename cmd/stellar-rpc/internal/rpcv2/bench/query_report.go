@@ -24,13 +24,22 @@ var allQueryTypes = []string{queryTypeLedgers, queryTypeTxPage, queryTypeTxHash,
 // Query report row labels, the results converter's contract (see querySpecs).
 // <rate> is the leg's target rate as formatRPS spells it.
 const (
-	queryRowTotalPrefix   = "total_r"
-	queryRowServicePrefix = "service_r"
-	driverLegRPSSuffix    = "_millirps"
-	driverLegLagSuffix    = "_lag"
-	driverLegShedSuffix   = "_shed"
-	driverQueryOpen       = "open"  // fixture open: catalog, handles, first read view
-	driverQueryEvict      = "evict" // one page-cache eviction pass before a cold leg
+	queryRowTotalPrefix          = "total_r"
+	queryRowServicePrefix        = "service_r"
+	driverLegRPSSuffix           = "_millirps"
+	driverLegTargetRPSSuffix     = "_target_millirps"
+	driverLegCompletionRPSSuffix = "_completion_millirps"
+	driverLegScheduledSuffix     = "_scheduled"
+	driverLegDispatchedSuffix    = "_dispatched"
+	driverLegSuccessSuffix       = "_successful"
+	driverLegFailedSuffix        = "_failed"
+	driverLegOfferedSuffix       = "_arrival"
+	driverLegElapsedSuffix       = "_elapsed"
+	driverLegDrainSuffix         = "_drain"
+	driverLegLagSuffix           = "_lag"
+	driverLegShedSuffix          = "_shed"
+	driverQueryOpen              = "open"  // fixture open: catalog, handles, first read view
+	driverQueryEvict             = "evict" // one page-cache eviction pass before a cold leg
 )
 
 // txhash sub-stage labels; total_r<rate> blends both.
@@ -60,5 +69,5 @@ func queryDriverLegRow(qtype string, rps float64, suffix string) string {
 	return queryDriverRow(qtype, rps) + suffix
 }
 
-// milliPerUnit is the scale of the _millirps row.
+// milliPerUnit is the scale of all rate rows, stored in the duration columns.
 const milliPerUnit = 1000
