@@ -38,7 +38,9 @@ func newQueryColdCommand() *cobra.Command {
 				return err
 			}
 			plan.Evict = evict
+			plan.Extra = env.Extra
 			env.Extra["pageCacheEviction"] = evictionState(evict)
+			env.Extra["cacheScenario"] = plan.cacheScenario()
 			return runQueryCold(ctx, logger, coldQueryOptions{
 				ColdRoot:   coldDir,
 				StartChunk: chunk.ID(startChunk),
@@ -53,8 +55,7 @@ func newQueryColdCommand() *cobra.Command {
 	fs.StringVar(&coldDir, "cold-dir", "",
 		"root of the frozen artifact tree to query, as bench-ingest cold's --cold-out-dir laid it out (required)")
 	fs.BoolVar(&evict, "evict-page-cache", true,
-		"drop the cold artifacts from the OS page cache before each leg, so a cold read is really cold "+
-			"(Linux only; elsewhere the run records that it did not happen)")
+		"request OS page-cache eviction before each leg (Linux only)")
 	markRequired(cmd, "start-chunk", "cold-dir")
 	return cmd
 }
@@ -65,7 +66,7 @@ func evictionState(requested bool) string {
 	case !requested:
 		return "off"
 	case evictSupported:
-		return "on"
+		return "requested"
 	default:
 		return "unsupported-on-this-platform"
 	}

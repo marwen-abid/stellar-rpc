@@ -28,10 +28,7 @@ func NewQueryCommand() *cobra.Command {
 	return cmd
 }
 
-// Read-shape flag defaults. The ledgers span and the events limit are the SLA
-// request shapes (getLedgers max=10, getEvents 10); the txpage span and limit
-// are the v2 page caps; the miss fraction is the production share of by-hash
-// lookups for a hash that never landed.
+// Read-shape flag defaults. These define storage workloads, not endpoint SLAs.
 const (
 	defaultLedgersSpan  = 10
 	defaultTxPageSpan   = 5
@@ -50,6 +47,8 @@ const (
 // maxTargetRPS is the highest arrival rate --target-rps accepts.
 const maxTargetRPS = 1_000_000
 
+const maxTxHashCorpusSize = 1_000_000
+
 // maxReadSpan is the widest span --ledgers-span and --txpage-span accept. A
 // request's last ledger is start+span-1 in uint32 and must not wrap.
 const maxReadSpan = chunk.LedgersPerChunk
@@ -59,19 +58,19 @@ const maxReadSpan = chunk.LedgersPerChunk
 // formats of --types, --target-rps, --duration and --warmup are the campaign
 // runner's argv contract.
 type queryFlags struct {
-	types       string
-	targetRPS   string
-	duration    time.Duration
-	warmup      int
-	warmupBound bool // bind --warmup (hot only)
+	types     string
+	targetRPS string
+	duration  time.Duration
+	warmup    int
 
-	ledgersSpan  uint32
-	txPageSpan   uint32
-	txPageLimit  int
-	eventsLimit  int
-	missFraction float64
-	passphrase   string
-	seed         int64
+	ledgersSpan      uint32
+	txPageSpan       uint32
+	txPageLimit      int
+	eventsLimit      int
+	missFraction     float64
+	txHashCorpusSize int
+	passphrase       string
+	seed             int64
 }
 
 func (f *queryFlags) bind(cmd *cobra.Command) {
@@ -81,11 +80,8 @@ func (f *queryFlags) bind(cmd *cobra.Command) {
 	fs.StringVar(&f.targetRPS, "target-rps", defaultTargetRPS,
 		"comma-separated arrival rates to run, in requests per second, e.g. 0.5,1,2")
 	fs.DurationVar(&f.duration, "duration", defaultLegDuration, "how long each --target-rps leg runs")
-	if f.warmupBound {
-		fs.IntVar(&f.warmup, "warmup", f.warmup,
-			"unmeasured queries per leg, dispatched at the leg's rate before measurement starts, "+
-				"warming the store's caches")
-	}
+	fs.IntVar(&f.warmup, "warmup", f.warmup,
+		"unmeasured query positions per leg at the leg's rate before measurement starts; does not prove steady state")
 	fs.Uint32Var(&f.ledgersSpan, "ledgers-span", defaultLedgersSpan,
 		"ledgers one ledgers query scans (1 = a point read)")
 	fs.Uint32Var(&f.txPageSpan, "txpage-span", defaultTxPageSpan,
@@ -97,6 +93,8 @@ func (f *queryFlags) bind(cmd *cobra.Command) {
 	fs.Float64Var(&f.missFraction, "miss-fraction", defaultMissFraction,
 		"share of txhash lookups asking for a hash that never landed, in [0, 1] "+
 			"(a miss probes every index, so it is the path's worst case)")
+	fs.IntVar(&f.txHashCorpusSize, "txhash-corpus-size", corpusTargetHashes,
+		"best-effort txhash corpus size, in [1, 1000000]; sampling may return fewer hashes")
 	fs.StringVar(&f.passphrase, "network-passphrase", network.PublicNetworkPassphrase,
 		"network passphrase the dataset's transactions were signed under; txhash and "+
 			"txpage need it to pair envelopes, and a wrong one fails the corpus build")
@@ -114,6 +112,9 @@ func (f *queryFlags) plan() (queryPlan, error) {
 	if err != nil {
 		return queryPlan{}, err
 	}
+	if err := validateTxHashCorpusSize(f.txHashCorpusSize); err != nil {
+		return queryPlan{}, err
+	}
 	switch {
 	case f.duration <= 0:
 		return queryPlan{}, fmt.Errorf("--duration must be > 0, got %v", f.duration)
@@ -127,24 +128,32 @@ func (f *queryFlags) plan() (queryPlan, error) {
 		return queryPlan{}, fmt.Errorf("--txpage-limit must be >= 1, got %d", f.txPageLimit)
 	case f.eventsLimit < 1:
 		return queryPlan{}, fmt.Errorf("--events-limit must be >= 1, got %d", f.eventsLimit)
-	case f.missFraction < 0 || f.missFraction > 1:
+	case !(f.missFraction >= 0 && f.missFraction <= 1): // also rejects NaN
 		return queryPlan{}, fmt.Errorf("--miss-fraction must be in [0, 1], got %v", f.missFraction)
 	case f.passphrase == "":
 		return queryPlan{}, errors.New("--network-passphrase is required")
 	}
 	return queryPlan{
-		Types:        types,
-		TargetRPS:    rates,
-		Duration:     f.duration,
-		Warmup:       f.warmup,
-		LedgersSpan:  f.ledgersSpan,
-		TxPageSpan:   f.txPageSpan,
-		TxPageLimit:  f.txPageLimit,
-		EventsLimit:  f.eventsLimit,
-		MissFraction: f.missFraction,
-		Passphrase:   f.passphrase,
-		Seed:         f.seed,
+		Types:            types,
+		TargetRPS:        rates,
+		Duration:         f.duration,
+		Warmup:           f.warmup,
+		LedgersSpan:      f.ledgersSpan,
+		TxPageSpan:       f.txPageSpan,
+		TxPageLimit:      f.txPageLimit,
+		EventsLimit:      f.eventsLimit,
+		MissFraction:     f.missFraction,
+		TxHashCorpusSize: f.txHashCorpusSize,
+		Passphrase:       f.passphrase,
+		Seed:             f.seed,
 	}, nil
+}
+
+func validateTxHashCorpusSize(size int) error {
+	if size < 1 || size > maxTxHashCorpusSize {
+		return fmt.Errorf("--txhash-corpus-size must be in [1, %d], got %d", maxTxHashCorpusSize, size)
+	}
+	return nil
 }
 
 // parseQueryTypes splits --types, in the caller's order. A type names its own

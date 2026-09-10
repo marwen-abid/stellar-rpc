@@ -25,7 +25,7 @@ import (
 
 // The tx-hash sampler reads randomly chosen ledgers, takes at most
 // corpusMaxHashesPerLedger hashes from each, and stops once the pool holds
-// corpusTargetHashes or corpusMaxLedgerReads reads are spent.
+// the requested target or a bounded ledger-draw budget is spent.
 const (
 	corpusTargetHashes       = 512
 	corpusMaxLedgerReads     = 512
@@ -49,6 +49,7 @@ var errNoTransactions = errors.New("the sampled ledgers carry no transactions")
 type txHashCorpus struct {
 	hashes       [][32]byte
 	missFraction float64
+	ledgerCount  int
 }
 
 // pick returns one hash to look up and whether it is expected to be found. A
@@ -68,7 +69,14 @@ func (c *txHashCorpus) pick(rng *rand.Rand) ([32]byte, bool) {
 // and checks that one of them resolves under the passphrase.
 func buildTxHashCorpus(
 	ctx context.Context, logger *supportlog.Entry, f *queryFixture, missFraction float64, seed int64,
+	target int,
 ) (*txHashCorpus, error) {
+	if target == 0 {
+		target = corpusTargetHashes
+	}
+	if err := validateTxHashCorpusSize(target); err != nil {
+		return nil, err
+	}
 	view, err := f.view()
 	if err != nil {
 		return nil, fmt.Errorf("acquire read view: %w", err)
@@ -79,7 +87,7 @@ func buildTxHashCorpus(
 	s := newTxHashSampler(rng)
 	for i, c := range f.Chunks {
 		// Each chunk fills the pool up to its share, so the pool spans the range.
-		s.target = corpusTargetHashes * (i + 1) / len(f.Chunks)
+		s.target = int(int64(target) * int64(i+1) / int64(len(f.Chunks)))
 		if err := s.sampleChunk(view, c, f.FirstLedger, f.LastLedger); err != nil {
 			return nil, err
 		}
@@ -93,7 +101,11 @@ func buildTxHashCorpus(
 		return nil, err
 	}
 	s.logCoverage(logger, missFraction)
-	return &txHashCorpus{hashes: s.hashes, missFraction: missFraction}, nil
+	if len(s.hashes) < target {
+		logger.Warnf("txhash corpus underfilled: %d of %d requested hashes after bounded sampling; "+
+			"sparse data and repeated ledger draws can limit coverage", len(s.hashes), target)
+	}
+	return &txHashCorpus{hashes: s.hashes, missFraction: missFraction, ledgerCount: len(s.ledgers)}, nil
 }
 
 // txHashSampler draws transaction hashes from a fixture's ledgers. It reads
@@ -130,7 +142,7 @@ func (s *txHashSampler) first() ([32]byte, uint32) {
 func (s *txHashSampler) sampleChunk(view *query.ReadView, c chunk.ID, first, last uint32) error {
 	lo := max(c.FirstLedger(), first)
 	hi := min(c.LastLedger(), last)
-	if lo > hi {
+	if lo > hi || len(s.hashes) >= s.target {
 		return nil
 	}
 	reader, err := view.Ledgers(c)
@@ -139,7 +151,12 @@ func (s *txHashSampler) sampleChunk(view *query.ReadView, c chunk.ID, first, las
 	}
 
 	span := int(hi - lo + 1)
-	for reads := 0; reads < corpusMaxLedgerReads && len(s.hashes) < s.target; reads++ {
+	// Allow 16 draws per needed ledger, with a floor of 512 and a span cap.
+	// Draws can repeat, so exhausting this budget need not fill the pool.
+	needed := min(s.target-len(s.hashes), maxTxHashCorpusSize)
+	maxLedgerReads := min(span, max(corpusMaxLedgerReads,
+		((needed+corpusMaxHashesPerLedger-1)/corpusMaxHashesPerLedger)*16))
+	for reads := 0; reads < maxLedgerReads && len(s.hashes) < s.target; reads++ {
 		seq := lo + uint32(s.rng.IntN(span)) //nolint:gosec // span <= LedgersPerChunk
 		if _, drawn := s.read[seq]; drawn {
 			continue
@@ -165,6 +182,7 @@ func (s *txHashSampler) sampleChunk(view *query.ReadView, c chunk.ID, first, las
 		if len(picked) == 0 {
 			continue
 		}
+		picked = picked[:min(len(picked), s.target-len(s.hashes))]
 		s.hashes = append(s.hashes, picked...)
 		s.ledgers = append(s.ledgers, seq)
 	}
@@ -178,7 +196,7 @@ func (s *txHashSampler) logCoverage(logger *supportlog.Entry, missFraction float
 		len(s.hashes), len(s.ledgers), slices.Min(s.ledgers), slices.Max(s.ledgers), missFraction)
 	if len(s.ledgers) == 1 {
 		logger.Warnf("txhash corpus came from ledger %d alone: every found lookup reads that "+
-			"one ledger, so this run's found rows measure a warm read", s.ledgers[0])
+			"one ledger, so repeated lookups may benefit from cache reuse", s.ledgers[0])
 	}
 }
 

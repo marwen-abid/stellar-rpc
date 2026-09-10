@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strconv"
 
 	sdkingest "github.com/stellar/go-stellar-sdk/ingest"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
@@ -30,9 +31,13 @@ func newQueryRequest(
 	case queryTypeTxPage:
 		return txPageRequest(f, p), nil
 	case queryTypeTxHash:
-		corpus, err := buildTxHashCorpus(ctx, logger, f, p.MissFraction, p.Seed)
+		corpus, err := buildTxHashCorpus(ctx, logger, f, p.MissFraction, p.Seed, p.TxHashCorpusSize)
 		if err != nil {
 			return nil, err
+		}
+		if p.Extra != nil {
+			p.Extra["txhashCorpusHashes"] = strconv.Itoa(len(corpus.hashes))
+			p.Extra["txhashCorpusLedgers"] = strconv.Itoa(corpus.ledgerCount)
 		}
 		return txHashRequest(ctx, f, corpus), nil
 	case queryTypeEvents:

@@ -25,9 +25,25 @@ type queryPlan struct {
 	Passphrase   string
 	Seed         int64
 
-	// Evict drops the cold artifacts from the OS page cache before each leg.
-	// Cold only.
+	// TxHashCorpusSize caps the sampled pool. Zero uses corpusTargetHashes.
+	TxHashCorpusSize int
+
+	// Evict requests OS page-cache eviction before each cold leg.
 	Evict bool
+
+	// Extra receives invocation metadata. It may be nil for internal callers.
+	Extra map[string]string
+}
+
+func (p queryPlan) cacheScenario() string {
+	switch {
+	case p.Warmup > 0:
+		return "warm-run"
+	case p.Evict:
+		return "cold-start"
+	default:
+		return "existing-cache"
+	}
 }
 
 // queryFixture is the read side of one bench-query run: the registry over a
@@ -47,7 +63,7 @@ type queryFixture struct {
 	// FirstLedger and LastLedger bound the ledgers the corpora may sample.
 	FirstLedger, LastLedger uint32
 
-	// EvictPaths are the files a cold leg drops from the page cache. Empty for
+	// EvictPaths are the files a cold leg requests page-cache eviction for. Empty for
 	// a hot fixture.
 	EvictPaths []string
 }
@@ -72,8 +88,9 @@ func (f *queryFixture) verifyServes() error {
 	return nil
 }
 
-// evictColdArtifacts drops EvictPaths from the OS page cache and returns how
-// many files it advised. A missing file is skipped.
+// evictColdArtifacts requests page-cache eviction and counts successful calls.
+// Linux skips missing files. Off Linux, calls are no-ops that count every path;
+// invocation metadata records that eviction is unsupported.
 func (f *queryFixture) evictColdArtifacts() (int, error) {
 	evicted := 0
 	for _, path := range f.EvictPaths {

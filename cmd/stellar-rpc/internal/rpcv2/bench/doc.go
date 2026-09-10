@@ -6,6 +6,9 @@
 // loop. A query run reads a dataset an ingest run left on disk, rebuilds the
 // catalog state the artifacts imply, and issues each query type at each
 // arrival rate through query.ReadView.
+// Query results measure storage read paths, not RPC endpoint SLAs: handler,
+// response serialization and network work are excluded. Cache scenarios record
+// requested controls, not a verified cache state. See README.md for semantics.
 //
 // A csvSink collects the signals and aggregates the run into percentile CSV
 // reports.

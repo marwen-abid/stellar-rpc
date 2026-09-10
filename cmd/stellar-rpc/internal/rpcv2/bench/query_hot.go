@@ -20,7 +20,7 @@ const defaultHotWarmup = 20
 
 func newQueryHotCommand() *cobra.Command {
 	var (
-		qf   = queryFlags{warmup: defaultHotWarmup, warmupBound: true}
+		qf   = queryFlags{warmup: defaultHotWarmup}
 		prof profileFlags
 
 		chunkID       uint32
@@ -35,6 +35,9 @@ func newQueryHotCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			plan.Extra = env.Extra
+			env.Extra["pageCacheEviction"] = evictionState(false)
+			env.Extra["cacheScenario"] = plan.cacheScenario()
 			return runQueryHot(ctx, logger, hotQueryOptions{
 				HotRoot:       hotDir,
 				Chunk:         chunk.ID(chunkID),
