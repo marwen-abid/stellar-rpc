@@ -50,6 +50,7 @@ jobs:
           # shellcheck disable=SC2016 # the backticks in the JMESPath query are literals, not command substitution
           BOXES=$(aws ec2 describe-instances \
             --filters "Name=tag:rpc-bench,Values=true" \
+                      "Name=tag:test,Values=stellar-rpc-ci-load-test" \
                       "Name=instance-state-name,Values=pending,running" \
             --query 'Reservations[].Instances[].{id:InstanceId,deadline:Tags[?Key==`deadline`]|[0].Value,runId:Tags[?Key==`run-id`]|[0].Value}' \
             --output json)
@@ -82,7 +83,7 @@ jobs:
       # A reap means a box outlived every in-band ceiling, which is worth a human
       # look. post-slack.sh degrades every delivery failure to a warning.
       - name: Alert on reaped boxes
-        if: steps.reap.outputs.terminated != ''
+        if: steps.reap.outputs.terminated != '' || steps.reap.outputs.untagged != ''
         env:
           MODE: reaper
           REAPED_JSON: ${{ steps.reap.outputs.reaped_json }}
