@@ -68,7 +68,7 @@ on:
         default: main
 
 # Campaigns run in parallel: every run launches its own box, writes under its
-# own runs/<run_id>/ S3 prefix, and the relay ignores other runs' result
+# own runs/<run_id>/<run_attempt>/ S3 prefix, and the relay rejects other runs' result
 # objects. The group is per run so a re-run of the same run_id queues behind
 # the original rather than racing it. Never cancel — a cancelled chain leaves
 # the box to its self-terminate ceiling.
@@ -88,7 +88,7 @@ env:
   AWS_REGION: us-east-1
   BUCKET: stellar-rpc-ci-load-test
   PERF_EVAL_DIR: cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval
-  RESULT_KEY: runs/${{ github.run_id }}/campaign/result.json # deterministic per run
+  RESULT_KEY: runs/${{ github.run_id }}/${{ github.run_attempt }}/campaign/result.json
 
 jobs:
   validate:
@@ -184,7 +184,7 @@ jobs:
 
       # The role has no s3:ListBucket, so an absent key reads as 403, not 404;
       # seeding RESULT_KEY lets the relay treat fetch errors as genuine faults.
-      # A re-run also overwrites the previous attempt's verdict here.
+      # Every attempt seeds its own key before launch.
       - name: Seed the pending result marker
         env:
           RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
@@ -236,7 +236,7 @@ jobs:
     name: Await campaign (window 1/4)
     needs: [validate, launch]
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 350
     outputs:
       state: ${{ steps.poll.outputs.state }}
     steps:
@@ -261,7 +261,7 @@ jobs:
     needs: [validate, launch, poll1]
     if: needs.poll1.outputs.state == 'running'
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 350
     outputs:
       state: ${{ steps.poll.outputs.state }}
     steps:
@@ -285,7 +285,7 @@ jobs:
     needs: [validate, launch, poll2]
     if: needs.poll2.outputs.state == 'running'
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 350
     outputs:
       state: ${{ steps.poll.outputs.state }}
     steps:
@@ -309,7 +309,7 @@ jobs:
     needs: [validate, launch, poll3]
     if: needs.poll3.outputs.state == 'running'
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 350
     outputs:
       state: ${{ steps.poll.outputs.state }}
     steps:
@@ -322,8 +322,7 @@ jobs:
           region: ${{ env.AWS_REGION }}
           instance_id: ${{ needs.launch.outputs.instance_id }}
           deadline_epoch: ${{ needs.validate.outputs.deadline_epoch }}
-      # Last window, no NEXT: `running` here only warns; the box's own ceiling
-      # and the reaper still kill it.
+      # Last window, no NEXT: a missing final verdict fails the job.
       - name: Gate on relay state
         env:
           STATE: ${{ steps.poll.outputs.state }}
