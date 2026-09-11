@@ -127,7 +127,7 @@ DEADLINE_HM=$(fmt_epoch_hm "${DEADLINE_EPOCH:-}")
 
 BOXLOG_URL=""
 VERDICT_URL=""
-if [ -n "$BUCKET" ] && [ -n "$RESULT_KEY" ]; then
+if [ -n "$BOX_ID" ] && [ -n "$BUCKET" ] && [ -n "$RESULT_KEY" ]; then
   BOXLOG_URL=$(s3_object_url "$BUCKET" "${RESULT_KEY%/*}/user-data.log")
   VERDICT_URL=$(s3_object_url "$BUCKET" "$RESULT_KEY")
 fi
@@ -152,7 +152,8 @@ fi
 if [ "$STATE" = "ok" ]; then
   TEXT="✅ bench campaign $CAMPAIGN_NAME passed — run_id=${BENCH_RUN_ID:-unknown} · ${SUMMARY_URL:-${RESULTS_URI:-s3://$BUCKET/$RESULT_KEY}} · $RUN_URL"
 else
-  TEXT="❌ bench campaign $CAMPAIGN_NAME failed: $REASON — box log s3://$BUCKET/${RESULT_KEY%/*}/user-data.log · $RUN_URL"
+  TEXT="❌ bench campaign $CAMPAIGN_NAME failed: $REASON · $RUN_URL"
+  if [ -n "$BOXLOG_URL" ]; then TEXT="$TEXT · box log (if uploaded): $BOXLOG_URL"; fi
 fi
 
 jq -n \

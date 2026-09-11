@@ -5,7 +5,7 @@ def button($t; $u): {type: "button", text: {type: "plain_text", text: $t, emoji:
 | {
     attachments: [{
       color: "#ecb22e",
-      fallback: "⚠️ bench reaper terminated past-deadline box(es): \($reaped | map(.id) | join(" ")) · \($run_url)",
+      fallback: "Reaper: \($n) terminated; \($loose | length) without usable deadlines. \($run_url)",
       blocks: (
         [{type: "header", text: {type: "plain_text",
           text: "⚠️ Reaper terminated \($n) past-deadline box\(if $n == 1 then "" else "es" end)", emoji: true}}]
@@ -17,6 +17,8 @@ def button($t; $u): {type: "button", text: {type: "plain_text", text: $t, emoji:
               ) )
             + ( $loose | map("• `\(.)` has no deadline tag — left alone (hand-launched?)") )
             | join("\n")
+            | if length == 0 then "No expired boxes."
+              elif length > 3000 then .[0:2950] + "\n[truncated; see reaper run]" else . end
           )}}]
         + (if $run_url != "" then
             [{type: "actions", elements: [button("Reaper run"; $run_url)]}] else [] end)

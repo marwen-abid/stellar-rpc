@@ -2,7 +2,7 @@
 # the slack-recap.jq object or null. Blocks are important-first; only fields2 and the footer risk the fold.
 def button($t; $u): {type: "button", text: {type: "plain_text", text: $t, emoji: true}, url: $u};
 def pbutton($t; $u): button($t; $u) + {style: "primary"};
-def field($l; $v): {type: "mrkdwn", text: "*\($l)*\n\($v)"};
+def field($l; $v): {type: "mrkdwn", text: ("*\($l)*\n\($v)" | .[0:2000])};
 
 (if $sha != "" then "\($ref) @ <\($repo)/commit/\($sha)|\($sha[0:8])>" else $ref end) as $reftxt
 | (if $elapsed != "" and $budget != "" then " in *\($elapsed)* of a \($budget) budget"
@@ -66,7 +66,7 @@ def field($l; $v): {type: "mrkdwn", text: "*\($l)*\n\($v)"};
       context: (
         if $box != "" and $rescued == "true" then
           "⚠️ The box stays up for debugging — terminate it by the run-id tag when done, or the reaper kills it at the deadline\(if $deadline_hm != "" then " (\($deadline_hm) UTC)" else "" end)."
-        elif $box != "" then "Box \($box) was terminated."
+         elif $box != "" then "Cleanup was requested for box \($box). Check the cleanup job for its outcome."
         else "No box was launched." end)
     }
   end) as $m
@@ -74,20 +74,20 @@ def field($l; $v): {type: "mrkdwn", text: "*\($l)*\n\($v)"};
 | {
     attachments: [{
       color: $m.color,
-      fallback: $text,
+      fallback: ($text | .[0:3000]),
       blocks: (
         [{type: "header", text: {type: "plain_text", text: $m.header, emoji: true}}]
-        + [{type: "section", text: {type: "mrkdwn", text: $m.lead}}]
-        + (if $m.quote != "" then [{type: "section", text: {type: "mrkdwn", text: $m.quote}}] else [] end)
+        + [{type: "section", text: {type: "mrkdwn", text: ($m.lead | .[0:3000])}}]
+        + (if $m.quote != "" then [{type: "section", text: {type: "mrkdwn", text: ($m.quote | if length > 3000 then .[0:2950] + "\n[truncated; see GitHub run]" else . end)}}] else [] end)
         + (if ($m.fields | length) > 0 then [{type: "section", fields: $m.fields}] else [] end)
         + (if ($m.buttons | length) > 0 then [{type: "actions", elements: $m.buttons}] else [] end)
         + (if $results != null then
             [{type: "divider"},
              {type: "section", text: {type: "mrkdwn",
-               text: (([$results.header] + $results.lines + [$results.footer]) | join("\n"))}}]
+               text: (([$results.header] + $results.lines + [$results.footer]) | join("\n") | .[0:3000])}}]
            else [] end)
         + (if ($m.fields2 | length) > 0 then [{type: "section", fields: $m.fields2}] else [] end)
-        + (if $m.context != "" then [{type: "context", elements: [{type: "mrkdwn", text: $m.context}]}] else [] end)
+        + (if $m.context != "" then [{type: "context", elements: [{type: "mrkdwn", text: ($m.context | .[0:2000])}]}] else [] end)
       )
     }]
   }
