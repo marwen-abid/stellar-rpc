@@ -28,6 +28,11 @@ is_uint() {
 # require_uint <name> <value> <min> <max>
 require_uint() {
   is_uint "$2" || die "$1 must be an integer, got '$2'"
+  case "$2" in
+    0) ;;
+    0*) die "$1 must not have leading zeros" ;;
+  esac
+  [ "${#2}" -le "${#4}" ] || die "$1 must be between $3 and $4, got '$2'"
   if [ "$2" -lt "$3" ] || [ "$2" -gt "$4" ]; then
     die "$1 must be between $3 and $4, got '$2'"
   fi
@@ -58,8 +63,7 @@ SETUP_MARGIN_MINUTES="${SETUP_MARGIN_MINUTES:-120}"
 NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
 
 # How long a bench-query leg holds each ladder rate. Mirrors the runner's
-# DefaultQueryDuration (runner/internal/config): the TOML cannot set it because
-# the runner rejects unknown keys.
+# DefaultQueryDuration (runner/internal/config), also emitted in the TOML.
 QUERY_LEG_DURATION_SECONDS="${QUERY_LEG_DURATION_SECONDS:-60}"
 # The runner's query grid (runner/internal/plan/plan.go): one leg per dataset,
 # run, tier (cold, hot) and type (ledgers, txpage, txhash, events).
@@ -68,6 +72,8 @@ query_type_count=4
 # Three ladder rates (benchmarks docs/targets.json: 0.5x, 1x, 2x of the phase
 # floor), QUERY_LEG_DURATION_SECONDS each.
 query_rate_steps=3
+# txhash takes the union of the SLA and demand ladders, at most six rates.
+query_rate_cells=$((query_type_count * query_rate_steps + 3))
 # Per-leg time outside the paced windows: corpus build, cold-leg cache drop, warmup.
 query_leg_overhead_secs=60
 
@@ -94,6 +100,9 @@ case "$PHASE" in
 esac
 
 require_uint runs "$RUNS" 1 20
+require_uint capacity_minutes "$CAPACITY_MINUTES" 1 1260
+require_uint setup_margin_minutes "$SETUP_MARGIN_MINUTES" 0 1260
+require_uint now_epoch "$NOW_EPOCH" 1 9999999999
 require_uint query_leg_duration_seconds "$QUERY_LEG_DURATION_SECONDS" 1 3600
 # A campaign runs chunk 1 only, so a cap above the 10,000-ledger chunk is a typo.
 require_uint hot_num_ledgers "$HOT_NUM_LEDGERS" 0 10000
@@ -132,6 +141,13 @@ case "$BENCHMARKS_REF" in
   *[!A-Za-z0-9._/-]*) die "benchmarks_ref must match [A-Za-z0-9._/-]+, got '$BENCHMARKS_REF'" ;;
 esac
 
+# URI overrides are quoted TOML strings, not executable fragments.
+for uri in "$PUBLISH_URI" "$INPUTS_PREFIX"; do
+  case "$uri" in
+    *[!A-Za-z0-9._/:=-]*) die "URI contains unsupported characters" ;;
+  esac
+done
+
 # Paced parts have a known wall clock: hot ingest legs replay `ledgers` ledgers at
 # the phase close interval, one per dataset per run; query legs hold each ladder
 # rate for a fixed duration. Cold ingest is unpaced and sits in the setup margin.
@@ -153,7 +169,7 @@ fi
 
 if [ "$QUERY" = yes ]; then
   query_legs=$((dataset_count * RUNS * query_tiers * query_type_count))
-  query_secs=$((query_legs * (query_rate_steps * QUERY_LEG_DURATION_SECONDS + query_leg_overhead_secs)))
+  query_secs=$((dataset_count * RUNS * query_tiers * (query_rate_cells * QUERY_LEG_DURATION_SECONDS + query_type_count * query_leg_overhead_secs)))
 else
   query_legs=0
   query_secs=0
@@ -163,7 +179,7 @@ budget_minutes=$(((hot_secs + query_secs + 59) / 60 + SETUP_MARGIN_MINUTES))
 if [ "$budget_minutes" -gt "$CAPACITY_MINUTES" ]; then
   hint="shrink runs (${RUNS}), cap hot_num_ledgers (${HOT_NUM_LEDGERS}), or split the phase into separate dispatches"
   if [ "$QUERY" = yes ]; then
-    hint="$hint; the ${query_legs} query legs (${query_rate_steps} rates of ${QUERY_LEG_DURATION_SECONDS}s each) cost ~$((query_secs / 60))m of it, so query=no is the other lever"
+    hint="$hint; the ${query_legs} query legs (up to 6 rates of ${QUERY_LEG_DURATION_SECONDS}s each) cost ~$((query_secs / 60))m of it, so query=no is the other lever"
   fi
   die "estimated budget ${budget_minutes}m exceeds the ${CAPACITY_MINUTES}m relay-chain ceiling;" "$hint"
 fi
@@ -181,6 +197,7 @@ toml_file="$(mktemp "${TMPDIR:-/tmp}/campaign-XXXXXX")"
   printf 'ref = "%s"\n' "$TARGET_REF"
   printf 'ingest = "%s"\n' "$INGEST"
   printf 'query = %s\n' "$query_bool"
+  printf 'query_duration = "%ss"\n' "$QUERY_LEG_DURATION_SECONDS"
   printf 'close_interval = "%s"\n' "$close_interval"
   printf 'runs = %s\n' "$RUNS"
   printf 'workers = %s\n' "$workers"
