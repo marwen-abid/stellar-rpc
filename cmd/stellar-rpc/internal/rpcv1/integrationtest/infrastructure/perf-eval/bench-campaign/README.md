@@ -19,6 +19,50 @@ runs at the dispatched commit; the benchmarked `ref` is resolved on the box.
    box stays up to its self-terminate ceiling for rescue over SSM.
 6. `bench-reaper.yml` terminates tagged boxes past their `deadline` tag.
 
+Each attempt uses `runs/<run_id>/<run_attempt>/campaign/` in the CI bucket.
+An old box cannot overwrite a later attempt's marker or sidecar.
+Relay faults and box failures both return `fail`; the polling diagnostics distinguish them.
+The final window fails if it returns `running` without a verdict.
+
+## Compatibility and limits
+
+The runner and converter exchange a data bundle. Matching Git commits is not
+required for compatibility. `run-info.json` records the execution commit as
+`benchmarksSha`; ingest logs its initial converter checkout separately.
+The selected benchmarks ref is resolved again during ingest. Publication from
+`main` uses the sibling ingest script's retry on concurrent result commits.
+Other refs convert locally and report `skipped`, without publication.
+
+The sibling converter does not yet enforce all input schema versions. It also
+reads assessment targets from its checkout. Format validation and assessment
+policy belong to that repository; this stack does not add a commit-equality gate.
+Only dispatch trusted refs: box scripts execute with the instance role, and
+ingest executes with AWS credentials and the site push token.
+
+The 1260-minute ceiling covers paced work plus a fixed 120-minute allowance for
+setup, cold ingest, and uploads. Cold work has no measured duration bound here.
+Query estimates allow six txhash rates and three rates for each other endpoint.
+Early bootstrap failure before AWS CLI installation can leave the marker pending
+until the relay deadline. Shutdown and the tagged reaper are the backstops.
+Live IAM permissions, six-hour OIDC sessions, EC2, S3, and Slack require operational
+verification. Offline tests do not prove those integrations.
+
+## Offline verification
+
+From the repository root, with Python 3.11+, Bash, jq, ShellCheck, and actionlint:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/bench-campaign/tests -v
+shellcheck cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/bench-campaign/*.sh
+shellcheck -s bash -e SC2016 cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/bootstrap-common.sh
+actionlint .github/workflows/bench-campaign.yml .github/workflows/bench-reaper.yml
+AWS_EC2_METADATA_DISABLED=true go test ./cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval/...
+```
+
+Shell tests use an isolated command path and environment. AWS, Git, and curl are
+stubbed when used. No test launches infrastructure, publishes data, or posts a
+notification. ShellCheck and actionlint are local checks, not repository CI jobs.
+
 ## File map
 
 | Path | Role |

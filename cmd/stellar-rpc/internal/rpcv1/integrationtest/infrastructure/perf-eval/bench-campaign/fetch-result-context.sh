@@ -5,23 +5,25 @@
 #   ok:   bench_run_id, results_uri, tarball_key from the run-info.json sidecar
 #         the box writes next to the result object (no markdown parsing).
 #   fail: excerpt, a few lines of the result object's verdict markdown.
-# Both check the object's runId against RUN_ID the way the relay does: attempts
-# share the key, so a re-run whose own upload failed would otherwise report the
-# previous attempt's. Best-effort: no output means fall back to the result key.
+# Both check the object's runId against RUN_ID the way the relay does.
+# Best-effort: no output means fall back to the workflow diagnostics.
 set -euo pipefail
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/campaign-context-XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
 
 case "$STATE" in
   ok)
-    if aws s3 cp "s3://$BUCKET/${RESULT_KEY%/*}/run-info.json" /tmp/run-info.json >/dev/null 2>&1; then
-      SIDECAR_RUN_ID=$(jq -r '.runId // ""' /tmp/run-info.json)
-      if [ "$SIDECAR_RUN_ID" = "$RUN_ID" ]; then
-        {
-          echo "bench_run_id=$(jq -r '.benchRunId // ""' /tmp/run-info.json)"
-          echo "results_uri=$(jq -r '.resultsUri // ""' /tmp/run-info.json)"
-          echo "tarball_key=$(jq -r '.tarballKey // ""' /tmp/run-info.json)"
-        } >> "${GITHUB_OUTPUT:-/dev/stdout}"
+    if aws s3 cp "s3://$BUCKET/${RESULT_KEY%/*}/run-info.json" "$WORK/run-info.json" >/dev/null 2>&1; then
+      if jq -e --arg run "$RUN_ID" '
+        .schemaVersion == 1 and .runId == $run and
+        ([.benchRunId, .resultsUri, .tarballKey, (.benchmarksSha // "")]
+          | all(type == "string" and (test("[\\r\\n]") | not)))
+        ' "$WORK/run-info.json" >/dev/null 2>&1; then
+        jq -r '"bench_run_id=\(.benchRunId)", "results_uri=\(.resultsUri)",
+          "tarball_key=\(.tarballKey)", "benchmarks_sha=\(.benchmarksSha // "")"' \
+          "$WORK/run-info.json" >> "${GITHUB_OUTPUT:-/dev/stdout}"
       else
-        echo "::warning::run-info.json is from run ${SIDECAR_RUN_ID:-<none>}, not $RUN_ID; the notification falls back to the result key"
+        echo "::warning::invalid or stale run-info.json; the notification falls back to workflow diagnostics"
       fi
     else
       echo "::warning::no run-info.json sidecar; the notification falls back to the result key"
@@ -30,18 +32,21 @@ case "$STATE" in
   fail)
     # The markdown holds the box's last console lines, the closest thing to a
     # cause. The seeded pending marker has no markdown and yields nothing.
-    aws s3 cp "s3://$BUCKET/$RESULT_KEY" /tmp/result.json >/dev/null 2>&1 || exit 0
-    [ "$(jq -r '.runId // ""' /tmp/result.json)" = "$RUN_ID" ] || exit 0
-    [ "$(jq -r '.verdict // ""' /tmp/result.json)" = "fail" ] || exit 0
+    aws s3 cp "s3://$BUCKET/$RESULT_KEY" "$WORK/result.json" >/dev/null 2>&1 || exit 0
+    jq -e --arg run "$RUN_ID" '.schemaVersion == 1 and .runId == $run and
+      .verdict == "fail" and (.markdown | type == "string")' \
+      "$WORK/result.json" >/dev/null 2>&1 || exit 0
     # Drop fences, blank lines and the ✅/❌ headline (the Slack header carries
     # the verdict); keep the first grep-worthy lines, else the last three.
-    jq -r '.markdown // ""' /tmp/result.json | grep -v '^```' | grep -v '^\s*$' | grep -v '^[✅❌]' > /tmp/verdict-lines.txt || true
-    EXCERPT=$(grep -m3 -iE 'fail|error|regression|gate|exceed|panic' /tmp/verdict-lines.txt || tail -n 3 /tmp/verdict-lines.txt)
+    jq -r '.markdown // ""' "$WORK/result.json" | grep -v '^```' | grep -v '^\s*$' | grep -v '^[✅❌]' > "$WORK/verdict-lines.txt" || true
+    EXCERPT=$(grep -m3 -iE 'fail|error|regression|gate|exceed|panic' "$WORK/verdict-lines.txt" || tail -n 3 "$WORK/verdict-lines.txt")
     [ -n "$EXCERPT" ] || exit 0
+    DELIMITER=VERDICT_EXCERPT_EOF
+    while printf '%s\n' "$EXCERPT" | grep -qxF "$DELIMITER"; do DELIMITER="${DELIMITER}_"; done
     {
-      echo "excerpt<<VERDICT_EXCERPT_EOF"
+      echo "excerpt<<$DELIMITER"
       echo "$EXCERPT"
-      echo "VERDICT_EXCERPT_EOF"
+      echo "$DELIMITER"
     } >> "${GITHUB_OUTPUT:-/dev/stdout}"
     ;;
 esac

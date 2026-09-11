@@ -383,6 +383,7 @@ jobs:
       # warning on any failure: a payload bug or a missing webhook must never
       # turn a passing campaign red.
       - name: Post the campaign notification
+        if: ${{ !cancelled() && steps.verdict.outputs.state != '' }}
         env:
           MODE: campaign
           STATE: ${{ steps.verdict.outputs.state }}

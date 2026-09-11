@@ -20,7 +20,7 @@ if [ "$STATE" != "ok" ]; then
   elif [ "$LAUNCH_RESULT" != "success" ]; then
     REASON="box launch failed"
   elif [ "$S1" = "fail" ] || [ "$S2" = "fail" ] || [ "$S3" = "fail" ] || [ "$S4" = "fail" ]; then
-    REASON="the campaign reported a failing verdict"
+    REASON="the campaign or relay failed; see polling diagnostics"
     RESCUED=true
   else
     REASON="the relay chain was exhausted without a verdict"
