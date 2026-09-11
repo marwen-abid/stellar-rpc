@@ -29,6 +29,7 @@ log "cloning stellar-rpc-benchmarks at $BENCH_REPO_REF"
 rm -rf /root/stellar-rpc-benchmarks
 git clone https://github.com/stellar-experimental/stellar-rpc-benchmarks.git /root/stellar-rpc-benchmarks
 git -C /root/stellar-rpc-benchmarks checkout "$BENCH_REPO_REF"
+BENCH_REPO_SHA=$(git -C /root/stellar-rpc-benchmarks rev-parse HEAD)
 
 # The benchmarks bootstrap owns the machine (NVMe, fsync probe, AWS CLI, Go/Rust,
 # native libs); a non-zero exit reaches the ERR trap and publishes a fail verdict.
@@ -67,7 +68,8 @@ upload_bundle() {
   fi
   if ! jq -n --arg run "$RUN_ID" --arg bench "$bench_run_id" \
         --arg uri "$results_uri" --arg tar "$tarball" --arg tarkey "$TARBALL_KEY" \
-        '{schemaVersion: 1, runId: $run, benchRunId: $bench, resultsUri: $uri, tarball: $tar, tarballKey: $tarkey}' \
+        --arg sha "$BENCH_REPO_SHA" \
+        '{schemaVersion: 1, runId: $run, benchRunId: $bench, resultsUri: $uri, tarball: $tar, tarballKey: $tarkey, benchmarksSha: $sha}' \
         > /tmp/run-info.json; then
     log "WARN: could not write run-info.json; notify falls back to the result key"
     return 0
@@ -118,13 +120,15 @@ if (cd /root/stellar-rpc-benchmarks/runner \
     printf -- '- campaign config: `%s`\n' /root/bench-campaign.toml
   } > "$RESULTS_FILE"
   upload_result ok "$RESULTS_FILE"
+  # Cleanup errors must not replace a published benchmark verdict.
+  trap - ERR
 
   # poweroff can outrun the EXIT trap, so push the box log first.
   # shutdown-behavior=terminate turns this poweroff into a terminate, releasing
   # the box without waiting for the poll chain.
   upload_box_log
   log "campaign complete: $BENCH_RUN_ID — powering off (terminates the instance)"
-  poweroff
+  poweroff || log "WARN: poweroff failed; workflow cleanup or the reaper must terminate the box"
 
 else
   # The runner's epilogue tars and publishes the legs that finished, so a bundle

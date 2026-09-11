@@ -4,7 +4,7 @@
 # The scripts ship verbatim; parameters travel in a preamble of exports, so the
 # bytes that run on the box match the bytes in git. Order is:
 #   preamble exports -> bootstrap-common.sh -> run-campaign.sh
-# BENCH_TOML_B64 is one base64 line, so it survives quoting as-is.
+# Shell-quoted exports preserve each parameter as one value.
 #
 # The result is gzipped: cloud-init gunzips user-data transparently, and the raw
 # script outgrew EC2's 16 KB user-data cap. The 16 KB cap is checked on the
@@ -19,11 +19,11 @@ OUT=${OUT:-/tmp/user-data.sh}
 
 {
   echo '#!/usr/bin/env bash'
-  echo "export RUN_ID=$RUN_ID"
-  echo "export BUCKET=$BUCKET RESULT_KEY=$RESULT_KEY"
-  echo "export SELF_TERMINATE_MINUTES=$SELF_TERMINATE_MINUTES BUDGET_MINUTES=$BUDGET_MINUTES"
-  echo "export BENCH_TOML_B64=\"$BENCH_TOML_B64\""
-  echo "export BENCH_REPO_REF=\"$BENCH_REPO_REF\""
+  printf 'export RUN_ID=%q\n' "$RUN_ID"
+  printf 'export BUCKET=%q RESULT_KEY=%q\n' "$BUCKET" "$RESULT_KEY"
+  printf 'export SELF_TERMINATE_MINUTES=%q BUDGET_MINUTES=%q\n' "$SELF_TERMINATE_MINUTES" "$BUDGET_MINUTES"
+  printf 'export BENCH_TOML_B64=%q\n' "$BENCH_TOML_B64"
+  printf 'export BENCH_REPO_REF=%q\n' "$BENCH_REPO_REF"
   cat "$DIR/../bootstrap-common.sh"
   cat "$DIR/run-campaign.sh"
 } > "$OUT"
