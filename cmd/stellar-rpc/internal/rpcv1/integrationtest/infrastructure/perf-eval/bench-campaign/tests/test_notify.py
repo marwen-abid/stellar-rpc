@@ -107,3 +107,5 @@ printf 'stub archive' > "$4"''')
     def test_notification_survives_context_step_failure(self):
         workflow = (ROOT / ".github/workflows/bench-campaign.yml").read_text()
         self.assertIn("- name: Post the campaign notification\n        if: ${{ !cancelled() && steps.verdict.outputs.state != '' }}", workflow)
+        self.assertIn("id: ingest\n        timeout-minutes: 12\n        continue-on-error: true", workflow)
+        self.assertIn("ingest timed out or failed before reporting its outcome", workflow)

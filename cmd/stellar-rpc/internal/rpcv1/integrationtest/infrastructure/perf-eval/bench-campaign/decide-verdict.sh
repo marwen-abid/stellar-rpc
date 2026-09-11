@@ -23,7 +23,7 @@ if [ "$STATE" != "ok" ]; then
     REASON="the campaign or relay failed; see polling diagnostics"
     RESCUED=true
   else
-    REASON="the relay chain was exhausted without a verdict"
+    REASON="no final relay verdict; inspect poll jobs for failure or exhaustion"
   fi
 fi
 {

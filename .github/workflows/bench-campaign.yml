@@ -371,6 +371,8 @@ jobs:
       # ingest_state / ingest_reason.
       - name: Ingest the run into the results site
         id: ingest
+        timeout-minutes: 12
+        continue-on-error: true
         if: steps.verdict.outputs.state == 'ok' && steps.context.outputs.tarball_key != ''
         env:
           TARBALL_KEY: ${{ steps.context.outputs.tarball_key }}
@@ -408,8 +410,8 @@ jobs:
           RUN_JSON: ${{ steps.ingest.outputs.run_json }}
           # Empty when the ingest step was skipped by its `if:` (a failed
           # campaign, or no tarball), i.e. the ingest was never attempted.
-          INGEST_STATE: ${{ steps.ingest.outputs.ingest_state }}
-          INGEST_REASON: ${{ steps.ingest.outputs.ingest_reason }}
+          INGEST_STATE: ${{ steps.ingest.outputs.ingest_state || (steps.ingest.outcome == 'failure' && 'failed' || '') }}
+          INGEST_REASON: ${{ steps.ingest.outputs.ingest_reason || (steps.ingest.outcome == 'failure' && 'ingest timed out or failed before reporting its outcome' || '') }}
           EXCERPT: ${{ steps.context.outputs.excerpt }}
           HARNESS_SHA: ${{ github.sha }}
           WEBHOOK: ${{ secrets.SLACK_BENCH_WEBHOOK_URL }}
