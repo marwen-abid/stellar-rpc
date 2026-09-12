@@ -8,7 +8,7 @@ runs at the dispatched commit; the benchmarked `ref` is resolved on the box.
 ## Lifecycle
 
 1. `validate` checks the dispatch inputs and renders the campaign TOML.
-2. `launch` seeds the pending result marker in S3, renders the gzipped
+2. `launch` checks that the fresh result key returns NoSuchKey, renders the gzipped
    user-data (preamble + `bootstrap-common.sh` + `run-campaign.sh`), boots the
    box, and waits for its SSM agent.
 3. `poll1`..`poll4` relay the wait across four job windows; exactly one window
@@ -42,8 +42,14 @@ ingest executes with AWS credentials and the site push token.
 The 1260-minute ceiling covers paced work plus a fixed 120-minute allowance for
 setup, cold ingest, and uploads. Cold work has no measured duration bound here.
 Query estimates allow six txhash rates and three rates for each other endpoint.
-Early bootstrap failure before AWS CLI installation can leave the marker pending
+Early bootstrap failure before AWS CLI installation can leave the result absent
 until the relay deadline. Shutdown and the tagged reaper are the backstops.
+The workflow role needs `s3:GetObject` and effective `s3:ListBucket` permission
+for absent result keys to return 404 instead of 403. The pre-launch access check
+fails closed on denied access or an existing result; it never writes a pending
+marker. Upstream #936 at `927d4c17` accepts only `ok` and `fail` producer verdicts.
+Relay waits through absent/stale objects and transient failures, but reports
+permanent request errors immediately. IAM changes are not part of this stack.
 Live IAM permissions, six-hour OIDC sessions, EC2, S3, and Slack require operational
 verification. Offline tests do not prove those integrations.
 
@@ -71,6 +77,7 @@ notification. ShellCheck and actionlint are local checks, not repository CI jobs
 | `render-user-data.sh` | Assembles and gzips the user-data; fails on EC2's 16 KB cap. |
 | `run-campaign.sh` | Sourced fragment run on the box: build, campaign, bundle upload, result object. |
 | `launch-box.sh` | Runs the instance with the tags cleanup, the GHA role and the reaper rely on. |
+| `check-result-key.sh` | Requires a fresh key and NoSuchKey response before launch; detects missing read/list permissions. |
 | `gate-relay-state.sh` | Turns the relay's `state` into a poll job's pass, handoff or failure. |
 | `decide-verdict.sh` | Reduces the four poll states and the validate/launch results to `state`, `reason`, `rescued`. |
 | `fetch-result-context.sh` | Reads this attempt's run-info sidecar (ok) or verdict excerpt (fail) from S3. |
@@ -80,7 +87,7 @@ notification. ShellCheck and actionlint are local checks, not repository CI jobs
 | `slack-recap.jq` | The ingestion-vs-target recap read from a run's site JSON. |
 | `post-slack.sh` | Renders via `slack-payload.sh` and posts; degrades to a warning, never fails. |
 | `../bootstrap-common.sh` | Box bootstrap shared with the other perf-eval workflows. |
-| `.github/workflows/bench-campaign.yml` | The campaign workflow. Inline steps: seed marker, summarize plan, wait for SSM, terminate. |
+| `.github/workflows/bench-campaign.yml` | The campaign workflow. Inline steps: summarize plan, wait for SSM, terminate. |
 | `.github/workflows/bench-reaper.yml` | Scheduled sweep of overdue boxes; untagged boxes are reported, not killed. |
 | `.github/actions/bench-poll/action.yml` | One relay window: Go toolchain, AWS credentials, the relay, the step summary. |
 | `perf-eval/relay` | The relay command. |

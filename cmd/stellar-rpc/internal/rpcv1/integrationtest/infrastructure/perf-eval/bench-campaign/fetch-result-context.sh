@@ -31,7 +31,7 @@ case "$STATE" in
     ;;
   fail)
     # The markdown holds the box's last console lines, the closest thing to a
-    # cause. The seeded pending marker has no markdown and yields nothing.
+    # cause. An absent result yields no excerpt.
     aws s3 cp "s3://$BUCKET/$RESULT_KEY" "$WORK/result.json" >/dev/null 2>&1 || exit 0
     jq -e --arg run "$RUN_ID" '.schemaVersion == 1 and .runId == $run and
       .verdict == "fail" and (.markdown | type == "string")' \
