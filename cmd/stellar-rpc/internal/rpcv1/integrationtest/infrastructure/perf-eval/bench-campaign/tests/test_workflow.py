@@ -32,7 +32,9 @@ printf '{"Instances":[{"InstanceId":"i-123"}]}\\n'
     def test_attempt_identity_and_windows(self):
         workflow = (ROOT / ".github/workflows/bench-campaign.yml").read_text()
         self.assertIn("RESULT_KEY: runs/${{ github.run_id }}/${{ github.run_attempt }}/campaign/result.json", workflow)
-        self.assertLess(workflow.index("name: Seed the pending result marker"), workflow.index("name: Launch EC2 instance"))
+        self.assertLess(workflow.index("name: Check result-key access"), workflow.index("name: Launch EC2 instance"))
+        self.assertNotIn('verdict: "pending"', workflow)
+        self.assertNotIn("s3api put-object", workflow)
         self.assertEqual(workflow.count("uses: ./.github/actions/bench-poll"), 4)
         self.assertEqual(workflow.count("timeout-minutes: 350"), 4)
         for n in (1, 2, 3):
@@ -41,3 +43,18 @@ printf '{"Instances":[{"InstanceId":"i-123"}]}\\n'
         self.assertIn("WINDOW_SECONDS: 19200", action)
         self.assertIn("go run", action)
         self.assertNotIn("uses: ./.github/actions/setup-go", action)
+
+    def test_result_key_access_before_launch(self):
+        self.stub("aws", '''[ "$1 $2" = 's3api get-object' ] || exit 99
+printf '%s\\n' "$*" > "$HOME/aws-args"
+[ "$CASE" != exists ] || exit 0
+printf 'An error occurred (%s) when calling the GetObject operation\\n' "$CASE" >&2
+exit 254''')
+        for case in ("NoSuchKey", "AccessDenied", "NoSuchBucket", "ExpiredToken", "RequestTimeout", "exists"):
+            with self.subTest(case=case):
+                result = self.run_script("check-result-key.sh", CASE=case, BUCKET="b",
+                                         RESULT_KEY="runs/42/2/campaign/result.json")
+                self.assertEqual(result.returncode == 0, case == "NoSuchKey", result.stderr)
+                args = (self.work / "aws-args").read_text()
+                self.assertIn("--key runs/42/2/campaign/result.json", args)
+                self.assertIn("--cli-read-timeout 30", args)
