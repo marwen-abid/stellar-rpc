@@ -69,8 +69,10 @@ on:
 
 # Campaigns run in parallel: every run launches its own box, writes under its
 # own runs/<run_id>/<run_attempt>/ S3 prefix, and the relay rejects other runs' result
-# objects. The group is per run so a re-run of the same run_id queues behind
-# the original rather than racing it. Never cancel — a cancelled chain leaves
+# objects. The one shared resource, the results-site push in notify, is race-safe
+# on its own (ingest.sh --push-main rebuilds and retries when main moves). The
+# group is per run so a re-run of the same run_id queues behind the original
+# rather than racing it. Never cancel — a cancelled chain leaves
 # the box to its self-terminate ceiling.
 concurrency:
   group: rpc-bench-${{ github.run_id }}
@@ -319,6 +321,103 @@ jobs:
         env:
           STATE: ${{ steps.poll.outputs.state }}
         run: ./"$PERF_EVAL_DIR"/bench-campaign/gate-relay-state.sh
+
+  notify:
+    name: Notify
+    needs: [validate, launch, poll1, poll2, poll3, poll4]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    # The results-site ingest (bundle download, converter, viewer smoke test,
+    # push) dominates this budget; the notification itself takes seconds.
+    timeout-minutes: 20
+    steps:
+      # For the bench-campaign scripts; same harness-version rule as validate
+      # (github.sha, not the benchmarked ref).
+      - uses: actions/checkout@v4
+
+      # The chain's shape carries the verdict: exactly one poll job sees the
+      # result object, the rest are skipped (empty state) or handed off.
+      - name: Decide the campaign verdict
+        id: verdict
+        env:
+          S1: ${{ needs.poll1.outputs.state }}
+          S2: ${{ needs.poll2.outputs.state }}
+          S3: ${{ needs.poll3.outputs.state }}
+          S4: ${{ needs.poll4.outputs.state }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          LAUNCH_RESULT: ${{ needs.launch.result }}
+        run: ./"$PERF_EVAL_DIR"/bench-campaign/decide-verdict.sh
+
+      # Unconditional: the ok path reads the sidecar and ingests, the fail path
+      # reads the result object for the notification's verdict excerpt.
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GHA_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 1800
+
+      # ok: the run-info sidecar (bench_run_id, results_uri, tarball_key);
+      # fail: the verdict excerpt. This attempt's runId only; best-effort.
+      - name: Read the run context from S3
+        id: context
+        env:
+          STATE: ${{ steps.verdict.outputs.state }}
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: ./"$PERF_EVAL_DIR"/bench-campaign/fetch-result-context.sh
+
+      # Best-effort: exits 0 on every path, so an ingest failure never turns a
+      # passing campaign red; the outcome reaches the card through
+      # ingest_state / ingest_reason.
+      - name: Ingest the run into the results site
+        id: ingest
+        timeout-minutes: 12
+        continue-on-error: true
+        if: steps.verdict.outputs.state == 'ok' && steps.context.outputs.tarball_key != ''
+        env:
+          TARBALL_KEY: ${{ steps.context.outputs.tarball_key }}
+          RESULTS_URI: ${{ steps.context.outputs.results_uri }}
+          PUSH_TOKEN: ${{ secrets.BENCHMARKS_PUSH_TOKEN }}
+          BENCH_REPO_REF: ${{ inputs.benchmarks_ref }}
+        run: ./"$PERF_EVAL_DIR"/bench-campaign/ingest-results-site.sh
+
+      # post-slack.sh renders the card via slack-payload.sh and degrades to a
+      # warning on any failure: a payload bug or a missing webhook must never
+      # turn a passing campaign red.
+      - name: Post the campaign notification
+        if: ${{ !cancelled() && steps.verdict.outputs.state != '' }}
+        env:
+          MODE: campaign
+          STATE: ${{ steps.verdict.outputs.state }}
+          REASON: ${{ steps.verdict.outputs.reason }}
+          BOX_RESCUED: ${{ steps.verdict.outputs.rescued }}
+          CAMPAIGN_NAME: ${{ needs.validate.outputs.campaign_name }}
+          PHASE: ${{ inputs.phase }}
+          INGEST: ${{ inputs.ingest }}
+          QUERY: ${{ inputs.query }}
+          RUNS: ${{ inputs.runs }}
+          HOT_NUM_LEDGERS: ${{ inputs.hot_num_ledgers }}
+          TARGET_REF: ${{ inputs.ref }}
+          WORKERS: ${{ needs.validate.outputs.workers }}
+          INSTANCE_TYPE: ${{ needs.validate.outputs.instance_type }}
+          BUDGET_MINUTES: ${{ needs.validate.outputs.budget_minutes }}
+          DEADLINE_EPOCH: ${{ needs.validate.outputs.deadline_epoch }}
+          BOX_ID: ${{ needs.launch.outputs.instance_id }}
+          RUN_ID_TAG: ${{ github.run_id }}
+          BENCH_RUN_ID: ${{ steps.context.outputs.bench_run_id }}
+          RESULTS_URI: ${{ steps.context.outputs.results_uri }}
+          VIEWER_URL: ${{ steps.ingest.outputs.viewer_url }}
+          RUN_JSON: ${{ steps.ingest.outputs.run_json }}
+          # Empty when the ingest step was skipped by its `if:` (a failed
+          # campaign, or no tarball), i.e. the ingest was never attempted.
+          INGEST_STATE: ${{ steps.ingest.outputs.ingest_state || (steps.ingest.outcome == 'failure' && 'failed' || '') }}
+          INGEST_REASON: ${{ steps.ingest.outputs.ingest_reason || (steps.ingest.outcome == 'failure' && 'ingest timed out or failed before reporting its outcome' || '') }}
+          EXCERPT: ${{ steps.context.outputs.excerpt }}
+          HARNESS_SHA: ${{ github.sha }}
+          WEBHOOK: ${{ secrets.SLACK_BENCH_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: ./"$PERF_EVAL_DIR"/bench-campaign/post-slack.sh
 
   cleanup:
     name: Terminate campaign box
