@@ -1,11 +1,15 @@
-// Package bench benchmarks full-history ingestion: the cold backfill that
-// bulk-materializes past ledgers at startup, and the hot loop that ingests the
-// live stream as it advances.
+// Package bench benchmarks full-history storage: writes (bench-ingest) and
+// reads (bench-query). Each has a cold and a hot subcommand, one per tier.
 //
-// A run drives the daemon's production ingestion code over a
-// benchmark-controlled ledger source and times it: cold calls
-// backfill.RunBackfill, hot calls the production ingestion loop. Both report
-// their per-stage timings through the MetricSink and observability.Metrics
-// interfaces; a csvSink implements those interfaces, collects the signals, and
-// aggregates each run into percentile CSV reports.
+// An ingest run drives the daemon's ingestion code over a benchmark-controlled
+// ledger source: cold calls backfill.RunBackfill, hot the production ingestion
+// loop. A query run reads a dataset an ingest run left on disk, rebuilds the
+// catalog state the artifacts imply, and issues each query type at each
+// arrival rate through query.ReadView.
+// Query results measure storage read paths, not RPC endpoint SLAs: handler,
+// response serialization and network work are excluded. Cache scenarios record
+// requested controls, not a verified cache state. See README.md for semantics.
+//
+// A csvSink collects the signals and aggregates the run into percentile CSV
+// reports.
 package bench

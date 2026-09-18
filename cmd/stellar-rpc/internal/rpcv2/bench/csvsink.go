@@ -143,8 +143,9 @@ var fileSpecs = func() []fileSpec {
 
 // querySpecs is the bench-query report schema for one run over types and
 // rates. Types must be distinct and so must rates, or the schema repeats a row
-// name. The external results converter recognizes only wall, _millirps, _lag
-// and _shed as driver leg rows; other driver rows are classified as setup.
+// name. The external results converter explicitly reads query-type CSVs and
+// driver.csv. It recognizes only wall, _millirps, _lag and _shed as driver leg
+// rows; other driver rows are classified as setup.
 // Keep the driver schema fixed and put completion accounting in its own file.
 // The row contract is:
 //
@@ -169,8 +170,12 @@ var fileSpecs = func() []fileSpec {
 //     _arrival is scheduled * interval; _elapsed is max(arrival, wall), which
 //     includes the final arrival interval; _drain is max(wall - arrival, 0).
 //   - In driver.csv and query-accounting.csv,
-//     zero lag, drain, rate and count observations are retained. Scalar rows
-//     have n=1; n_items is zero for rate, _arrival, _elapsed and _drain rows.
+//     zero lag, drain, rate and count observations are retained. The open and
+//     peak_rss_bytes rows have n=1; evict takes one observation per (type,
+//     rate) leg, so its n is the leg count, its total_ns the summed eviction
+//     time, and its percentiles the per-leg eviction cost. In
+//     query-accounting.csv, rate and window rows have n_items=0; driver.csv's
+//     wall and _millirps rows keep the successful-request count.
 //   - A driver row with no _r<rate> segment (open, evict, peak_rss_bytes) is
 //     setup.
 func querySpecs(types []string, rates []float64) []fileSpec {
