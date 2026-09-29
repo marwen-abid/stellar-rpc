@@ -138,9 +138,9 @@ func newBenchCommand(
 			defer stop()
 			startedAt := time.Now().UTC()
 			env := runEnv{OutDir: outDir, Extra: map[string]string{}}
-			// The first record is fatal on failure: a run whose report has
-			// nowhere to land is worth ending before it starts, not after
-			// hours. The last one only warns, so the run's own error surfaces.
+			// A failed first write ends the command before the run starts. A
+			// failed last write is only logged when the run failed, so the
+			// run's own error surfaces.
 			if err := os.MkdirAll(outDir, 0o755); err != nil {
 				return fmt.Errorf("create --out dir %s: %w", outDir, err)
 			}

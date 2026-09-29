@@ -259,12 +259,10 @@ type rowKey struct {
 // contract requires: the backfill scheduler runs several chunk freezes against
 // one sink.
 type csvSink struct {
+	specs []fileSpec // the report schema; read-only after construction
+
 	mu   sync.Mutex
 	rows map[rowKey]*series // every signal is one sample on a (file, row) key
-
-	// specs is the report schema files renders through. Read-only after
-	// construction.
-	specs []fileSpec
 
 	// hotBurst accumulates the current hot ledger's HotPhase durations so
 	// HotPhase can reconstruct the per-ledger end-to-end ingest_total (the

@@ -15,7 +15,7 @@ import (
 
 // cellSample is one measured request.
 type cellSample struct {
-	// service is the request body's run time (see timed).
+	// service is the request body's run time.
 	service time.Duration
 	// scheduled spans due time to completion: service plus dispatch lag.
 	scheduled time.Duration
@@ -25,8 +25,7 @@ type cellSample struct {
 	stage sampleStage
 }
 
-// sampleStage names a sub-stage row. It holds no pointer, so a leg's samples
-// slice needs no GC scan.
+// sampleStage names a sub-stage row.
 type sampleStage uint8
 
 const (
@@ -50,20 +49,10 @@ const maxInFlight = 512
 // milli-rps rows.
 const minLegRPS = 1.0 / milliPerUnit
 
-// maxLegRequests caps a leg's measured positions. A measured request is
-// retained twice. The leg holds 40 bytes (a 32-byte cellSample plus an 8-byte
-// dispatch lag). The leg allocates them up front from the measured count and
-// frees them when the leg ends. The sink holds 16 bytes per row the request
-// lands in (total_r<rate>, service_r<rate>, the driver _lag row, plus a txhash
-// found/miss row) until the run reports. Sink series grow by append, so
-// capacity can be about 25% over length, and a grow holds the old and the new
-// array for a short time. At the ceiling of 1e8 positions, the leg holds about
-// 4 GB. The sink holds 6 GB (8 GB for txhash) with that slack, plus up to
-// 1.6 GB while one series grows. Logging and aggregating the leg add about
-// 2.4 GB (3.2 GB for txhash) of transient copies, because aggregate copies 8
-// bytes per sample per row. The leg share is per leg; the sink share is
-// cumulative over types × rates. 1e8 positions is about 2.7 hours at 10k rps,
-// or 11 days at 100 rps. Aggregation runs only after a leg ends.
+// maxLegRequests caps a leg's measured positions, about 2.7 hours at 10k rps.
+// At the cap the leg holds about 4 GB of samples and lags until it ends, and
+// the sink about 6 GB (8 GB for txhash) until the run reports. The sink share
+// adds up over types × rates.
 const maxLegRequests = 100_000_000
 
 // Mixing constants for legRNG: odd and mutually prime.
@@ -76,36 +65,18 @@ const (
 // legRecord holds what a leg records as it runs. pacedLeg fills it; legResult
 // carries it out.
 type legRecord struct {
-	// samples holds the measured requests that succeeded. Written by the
-	// request goroutines, under pacedLeg.mu.
-	samples []cellSample
-	// lags holds one dispatch lag per measured position, shed positions
-	// included. Written by the dispatch goroutine only.
-	lags []time.Duration
-	// dispatched counts the measured requests that ran. Written by the
-	// dispatch goroutine only.
-	dispatched int
-	// shed counts the measured requests dropped at a full maxInFlight. Written
-	// by the dispatch goroutine only.
-	shed int
-	// warmupShed counts the warmup positions dropped at a full maxInFlight.
-	// The warmup requests that ran are warmup minus this count. Written by the
-	// dispatch goroutine only.
-	warmupShed int
-	// errs counts the measured requests that returned an error. Written by the
-	// request goroutines, under pacedLeg.mu.
-	errs int
-	// firstErr is the first request error recorded, "first" meaning first to
-	// take the mutex. It is nil when no measured request failed; errs counts
-	// them all. Written by the request goroutines, under pacedLeg.mu.
-	firstErr error
-	// warmupErrs counts the warmup requests that returned an error. A warmup
-	// request is unmeasured, so it contributes no sample and no lag. Written by
-	// the request goroutines, under pacedLeg.mu.
-	warmupErrs int
-	// firstWarmupErr is the first warmup error recorded. It is nil when no
-	// warmup request failed; warmupErrs counts them all. Written by the request
-	// goroutines, under pacedLeg.mu.
+	// Written by the dispatch goroutine only.
+	lags       []time.Duration // dispatch lag per measured position, shed ones included
+	dispatched int             // measured requests that ran
+	shed       int             // measured positions dropped at a full maxInFlight
+	warmupShed int             // warmup positions dropped at a full maxInFlight
+
+	// Written by the request goroutines, under pacedLeg.mu. A first error is
+	// the first to take the mutex; it is nil when its count is zero.
+	samples        []cellSample // measured requests that succeeded
+	errs           int
+	firstErr       error
+	warmupErrs     int
 	firstWarmupErr error
 }
 

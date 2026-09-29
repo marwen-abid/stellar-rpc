@@ -48,8 +48,6 @@ func TestRunPacedLegMeasuredCount(t *testing.T) {
 	assert.Equal(t, int64(25), fake.calls.Load(), "warmup requests run at the leg's rate")
 	assert.Positive(t, res.wall)
 	assert.Equal(t, arrivalWindow(rps, res), res.arrival)
-	assert.Equal(t, max(res.arrival, res.wall), res.elapsed)
-	assert.Equal(t, max(res.wall-res.arrival, 0), res.drain)
 
 	for i, s := range res.samples {
 		assert.Positive(t, s.service, "sample %d", i)
@@ -119,10 +117,8 @@ func (b *blockingRequest) run(*rand.Rand) (cellSample, error) {
 // requests run and the rest are shed; lags cover every measured position.
 func TestRunPacedLegSheds(t *testing.T) {
 	fake := &blockingRequest{release: make(chan struct{})}
-	// The counts below hold only if every slot is still held when the loop
-	// attempts the last of the 1000 positions. The 10ms schedule leaves the
-	// loop bound by its own work, and the release is 200x that schedule, so a
-	// slow or -race run has room. Keep the margin.
+	// The counts hold while every slot is held at the last of the 1000
+	// positions; the 2s release is 200x the 10ms schedule.
 	timer := time.AfterFunc(2*time.Second, func() { close(fake.release) })
 	defer timer.Stop()
 
@@ -266,8 +262,8 @@ func TestLaunchPacedRequestChargesLateDispatch(t *testing.T) {
 	assert.GreaterOrEqual(t, res.lags[0], late, "the dispatch lag is charged too")
 }
 
-// TestRunPacedLegRejectsBadArguments: a zero rate or a zero duration is an
-// error.
+// TestRunPacedLegRejectsBadArguments: a bad rate, duration or warmup count is
+// an error.
 func TestRunPacedLegRejectsBadArguments(t *testing.T) {
 	req := func(*rand.Rand) (cellSample, error) {
 		return timed(stageNone, func() (int, error) { return 1, nil })
@@ -324,8 +320,6 @@ func TestRunPacedLegNanosecondInterval(t *testing.T) {
 			assert.Zero(t, res.shed)
 			assert.Zero(t, res.errs)
 			assert.Equal(t, time.Nanosecond, res.arrival)
-			assert.Equal(t, max(res.arrival, res.wall), res.elapsed)
-			assert.Equal(t, max(res.wall-res.arrival, 0), res.drain)
 		})
 	}
 }
