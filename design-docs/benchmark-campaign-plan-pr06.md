@@ -4,7 +4,7 @@
 |---|---|
 | Branch | `bench-campaign-v2/06-campaign-plan` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
-| Depends on | None. D28, D29 and D32 are Proposed: confirm them before merge. The pack passphrase must be known (Section 9). |
+| Depends on | None. The pack passphrase must be known (Q10, Section 9). |
 | Implements | D10, D15 (plan, validate, estimate part), D21 (dataset shape), D28, D29, D33 (step list); spec 4, 5, 6.5, 7.3 |
 | Estimate | About 590 non-test lines: `main.go` 80; `internal/campaign` 240 (types 90, file I/O 40, validate 110); `internal/plan` 235 (profiles 40, plan 100, `load.toml` parser 65, estimate 30); `load.toml` 35; workflow 1 |
 
@@ -50,7 +50,7 @@ The benchmarks runner is `runner/` at `3bc7c49` (3,905 non-test lines). This PR 
 
 | Benchmarks runner | This PR | Change |
 |---|---|---|
-| `internal/config/config.go` `Config.validate`, `reName` (`^[A-Za-z0-9._-]+$`), `validateCloseInterval`, `validateQueryDuration` | `campaign.Inputs.Validate`, `plan.LoadConfig.validate` | Keep the rule shape and the error text style ("<key> must be ..., got '<v>'"). Drop `repo`, `ingest`, `query`, `phase`, `publish_uri`, `[[dataset]]`. |
+| `internal/config/config.go` `Config.validate`, `reName` (`^[A-Za-z0-9._-]+$`), `validateCloseInterval`, `validateQueryDuration` | `campaign.Inputs.Validate`, `campaign.Load.Validate` | Keep the rule shape and the error text style ("<key> must be ..., got '<v>'"). Drop `repo`, `ingest`, `query`, `phase`, `publish_uri`, `[[dataset]]`. |
 | `config.Load` (BurntSushi `toml.DecodeFile`, `md.Undecoded()`) | `plan.ParseLoad` | Use pelletier go-toml v1 `toml.NewDecoder(r).Strict(true)`, as `P/config/config.go` does. Unknown keys fail. |
 | `plan.Plan.WriteFile` | `campaign.Write` | Temporary file in the same directory, then `os.Rename`. |
 
@@ -126,7 +126,7 @@ generate_minutes = 15
 
 - Packs are at `<packs_prefix>/<profile>/packs-v2/cold` (spec 6.7).
 - The `[estimate]` values come from run `phase1-2x-full-history-4b6bc922-20260821T170437Z` on m6id.2xlarge: cold `backfill_wall` for one chunk was 704 s (sac-6000), 271 s and 250 s. Hot `ingest_total` p50 was 160 ms, 105 ms and 99 ms. The values above round up.
-- Checks in `LoadConfig.validate`: at least one level; `rps > 0`; `rng_seed > 0` (Blaster uses the clock when the seed is 0, `configs.go`); levels unique; mix keys in {`getTransaction`, `getEvents`, `getTransactions`, `getLedgers`, `getLatestLedger`, `getHealth`, `getNetwork`} (the D30 methods); mix sum 100; `run_duration` a positive Go duration; `generate_count >= 2`; every `[estimate]` value > 0.
+- Checks in `campaign.Load.Validate`: at least one level; `rps > 0`; `rng_seed > 0` (Blaster uses the clock when the seed is 0, `configs.go`); levels unique; mix keys in {`getTransaction`, `getEvents`, `getTransactions`, `getLedgers`, `getLatestLedger`, `getHealth`, `getNetwork`} (the D30 methods); mix sum 100; `run_duration` a positive Go duration; `generate_count >= 2`; every `[estimate]` value > 0.
 - go-toml v1 matches struct keys without case. Keep the mix as `map[string]int` so the method names keep their case.
 
 Level rendering (`func renderMix(level int, mix map[string]int) map[string]int`): use the largest remainder method. Floor each share. Give the remaining units, one each, to the largest fractional parts. On a tie, the method with the smaller percentage wins. Results: 250 → 150/50/37/13; 500 → 300/100/75/25; 1000 → 600/200/150/50 (spec 6.7 table).
@@ -135,28 +135,31 @@ Level rendering (`func renderMix(level int, mix map[string]int) map[string]int`)
 
 ```go
 const SchemaVersion = 1
-type Campaign struct { SchemaVersion int; ID string; Inputs Inputs; PacksPrefix string; Load Load; Profiles []Profile
+type Campaign struct { SchemaVersion int; ID string; Inputs Inputs; Load Load; Profiles []Profile
     Commit, RunnerCommit string; Machine *Machine; BlasterCommit, StartedAt, FinishedAt string; Steps []Step }
 type Inputs struct { Ref, CloseInterval, Steps string; Runs int; Machine string; Workers, PacedLedgers int; Name, Publish string }
-type Load struct { Levels []Level; MixPercent map[string]int; RunDuration string; GenerateCount int; Profile bool; Estimate Estimate }
-type Level struct { Rps, RngSeed int; Mix map[string]int }            // Mix: rendered integer rps
+// Load: each field has the same toml and json tag, the load.toml key (packs_prefix, run_duration, ...).
+type Load struct { PacksPrefix, RunDuration string; GenerateCount int; Profile bool; Level []Level
+    Mix map[string]int; Estimate Estimate }
+type Level struct { Rps, RngSeed int }                                  // keys rps, rng_seed
 type Profile struct { Name, DatasetKind, NetworkPassphrase string; StartChunk uint32; NumChunks int; Packs Packs }
 type Packs struct { ExpectedBytes, Bytes int64; Seconds float64 }
 type Step struct { Name, Kind, Profile, Tier string; Run int; LoadLevelRps []int; StartChunk uint32; NumChunks int
-    Path, Status, Error, StartedAt, FinishedAt string }
+    DatasetBytes int64; Path, Status, Error, StartedAt, FinishedAt string }
 ```
 
-- JSON keys are camelCase, as in spec 7.3. The runner fields use `omitempty`. `loadLevelRps` is `[]` (not `null`) for non-load steps.
-- `Load` replaces the spec example's `levelsRps`. It carries the whole `load.toml` (D28). Update the spec 7.3 example in this PR. `Step.StartedAt`, `Step.FinishedAt` and `Packs.ExpectedBytes` are new. Add them to spec 7.3 too.
+- JSON keys are camelCase, as in spec 7.3, except under `load`. `load` is a copy of `load.toml` with the same key names (D28, spec 7.3): `packs_prefix`, `run_duration`, `generate_count`, `profile`, `level[].rps`, `level[].rng_seed`, `mix`, `estimate`. `plan.ParseLoad` decodes `load.toml` into `campaign.Load`, so one type serves both files.
+- The runner fields use `omitempty`. `loadLevelRps` is `[]` (not `null`) for non-load steps. `tier` is omitted for ingest steps. `datasetBytes` is omitted until PR 07 writes it.
+- `campaign.json` holds no rendered per-method rps. PR 10 renders each level with `renderMix` and writes it to `<level>rps/blaster.toml`.
 - `Read(path)` uses `json.Decoder.DisallowUnknownFields`. It fails when `schemaVersion != 1` (D29).
 - `Write(path, c)` writes `<dir>/.campaign.json.tmp-*` with `os.CreateTemp`, syncs it and renames it over `path`.
 
 ### 4.7 Step list (`plan.Steps`)
 
-- `steps` input → kinds per run: `ingest-cold` → [ingest-cold]; `ingest-hot` → [ingest-hot, freeze]; `ingest` → [ingest-cold, ingest-hot, freeze]; `cold` → [ingest-cold, load-cold]; `all` → [ingest-cold, ingest-hot, load-cold, load-hot, freeze] (spec 5, D33).
-- The order is profile, then run, then kind (spec 4 item 6).
+- `steps` input (six choices) → kinds per run: `ingest-cold` → [ingest-cold]; `ingest-hot` → [ingest-hot, freeze]; `ingest` → [ingest-cold, ingest-hot, freeze]; `cold` → [ingest-cold, load-cold]; `hot` → [ingest-hot, load-hot, freeze]; `all` → [ingest-cold, ingest-hot, load-cold, load-hot, freeze] (spec 5, D33).
+- The order is profile, then run, then kind (spec 4 item 5).
 - Names: `<kind>-<profile>-run<N>`. A load step is `load-<tier>-<profile>-run<N>`. Path: `steps/<name>`.
-- `tier`: `cold` for `ingest-cold` and `load-cold`; `hot` for `ingest-hot`, `load-hot` and `freeze`.
+- `tier`: only load and freeze steps have it (spec 7.3). `cold` for `load-cold`; `hot` for `load-hot` and `freeze`. Ingest steps have no `tier`.
 - `loadLevelRps`: all levels of `load.toml` for a load step (Q4 is open; PR 10 can narrow it). Empty for the other kinds.
 - `status` is `pending` for every step.
 - `pacedLedgers` must not exceed `numChunks × 10000`.
@@ -166,10 +169,10 @@ type Step struct { Name, Kind, Profile, Tier string; Run int; LoadLevelRps []int
 One function. `validate`, `estimate` and PR 07 `run` call it after `Read`. `plan` calls `Inputs.Validate` on the flags, builds the campaign, then calls `Validate` on the result.
 - `inputs`: the Section 4.2 rules; runs 1 to 5; workers 1 to 128; pacedLedgers 0 to 20,000; publish `yes|no`.
 - `id` = `<inputs.name>-<digits>`.
-- `packsPrefix`: `s3://` or `file://` (PR 07 tests use `file://`), plus the URI character set.
-- `load`: the Section 4.5 rules. Each `Level.Mix` must equal `renderMix(level.Rps, MixPercent)`.
+- `load.packs_prefix`: `s3://` or `file://` (PR 07 tests use `file://`), plus the URI character set.
+- `load`: the Section 4.5 rules (`Load.Validate`).
 - `profiles`: unique names that match the name rule; `datasetKind` is `synthetic` or `pubnet`; the passphrase is not empty; `numChunks >= 1`. `Validate` does not compare profiles with the Go table. So a test can use its own profile.
-- `steps`: the names, in order, equal `plan.Steps(inputs, profiles, load)`; each status is one of `pending`, `running`, `ok`, `failed`, `crashed`, `skipped`.
+- `steps`: the names, in order, equal `plan.Steps(inputs, profiles, load)`; `tier` is set on load and freeze steps only; each status is one of `pending`, `running`, `ok`, `failed`, `crashed`, `skipped`.
 - `Validate` returns all failures joined with `errors.Join`, one per line.
 
 ### 4.9 Estimate (`plan.Estimate(c) (minutes int, terms []Term)`)
@@ -179,7 +182,7 @@ Sum of (spec 6.5):
 - per profile: `packs.expectedBytes / (fetch_mb_per_s × 10^6)` seconds;
 - per `ingest-cold` step: `numChunks × cold_chunk_minutes`;
 - per `ingest-hot` step: `paced × closeInterval + unpaced × unpaced_ledger_ms`, with `total = numChunks × 10000`, `paced = total` when `pacedLedgers` is 0, else `pacedLedgers`, and `unpaced = total − paced`;
-- per load step: `serve_start_minutes + generate_minutes + levels × run_duration`, plus `levels × serve_start_minutes` for the cold tier (bench-serve restarts per Blaster run, spec 6.7 item 5.1);
+- per load step: `serve_start_minutes + generate_minutes + levels × run_duration`, plus `levels × serve_start_minutes` for the cold tier (bench-serve restarts per Blaster run, spec 6.7 item 6.1);
 - per `freeze` step: `numChunks × freeze_chunk_minutes`.
 
 Round the sum up to whole minutes. Example: `2s`, `all`, runs 1, paced 10,000. The hot terms are 3 × (20,000 s + 10,000 × 0.25 s) = 1,125 minutes.
@@ -205,11 +208,11 @@ Round the sum up to whole minutes. Example: `2s`, `all`, runs 1, paced 10,000. T
 | Test | Package/file | What it proves | How |
 |---|---|---|---|
 | `TestPlanEachCloseInterval` | `plan/plan_test.go` | `plan` writes a valid file for `2s`, `1s`, `600ms` | Table test; `Plan` then `campaign.Validate`; check profile names and step count (3 × 5 for `all`). |
-| `TestStepsPerChoice` | `plan/plan_test.go` | Each `steps` choice gives the spec 5 kinds in order; freeze follows load-hot | Compare names. |
+| `TestStepsPerChoice` | `plan/plan_test.go` | Each of the six `steps` choices gives the spec 5 kinds in order; freeze follows load-hot; only load and freeze steps have `tier` | Compare names and tiers. |
 | `TestRenderMix` | `plan/load_test.go` | 250/500/1000 give the spec 6.7 integers; the sum equals the level | Table test. |
 | `TestParseLoadRejects` | `plan/load_test.go` | An unknown key, a seed of 0, a mix sum of 99, an unknown method each fail | Strings in the test; `ParseLoad(strings.NewReader(...))`. |
-| `TestEmbeddedLoadValid` | `plan/load_test.go` | The embedded `load.toml` parses and validates | Read `../../load.toml`. |
-| `TestValidateRejects` | `campaign/validate_test.go` | Each bad input fails with its key named: runs 0 and 6, workers 129, paced 20,001, name `-x` and `a b`, ref `-r`, machine `4x`, close interval `3s`, steps `x`, publish `maybe`, bad id, bad prefix, a renamed step, a status `done`, an unknown JSON field, `schemaVersion` 2 | One valid campaign from a helper `validCampaign(t)`; each case mutates one field. |
+| `TestEmbeddedLoadValid` | `plan/load_test.go` | The embedded `load.toml` parses and validates; `campaign.json.load` has the same key names as `load.toml` | Read `../../load.toml`; decode it and the marshaled `load` into `map[string]any` and compare the key sets. |
+| `TestValidateRejects` | `campaign/validate_test.go` | Each bad input fails with its key named: runs 0 and 6, workers 129, paced 20,001, name `-x` and `a b`, ref `-r`, machine `4x`, close interval `3s`, steps `x`, publish `maybe`, bad id, bad prefix, a renamed step, a `tier` on an ingest step, a status `done`, an unknown JSON field, `schemaVersion` 2 | One valid campaign from a helper `validCampaign(t)`; each case mutates one field. |
 | `TestWriteReadRoundTrip` | `campaign/file_test.go` | `Write` then `Read` gives the same value; no temporary file remains | `t.TempDir()`. |
 | `TestEstimateFormula` | `plan/estimate_test.go` | The estimate equals the Section 4.9 sum | A hand-computed campaign: 1 profile, `all`, paced 100 at `2s`; compare with the formula in the test. |
 | `TestMainNoCgo` | `main_test.go` | The program builds with `CGO_ENABLED=0` | `exec.Command("go", "build", "-o", tmp, ".")` with `CGO_ENABLED=0`. |
@@ -242,7 +245,8 @@ make go-check-branch BASE=feature/full-history
 - The network passphrase of the packs is not verified. No file in stellar-rpc or the benchmarks repository names it. Read it first from the generator's `METADATA.md` under `gs://rpc-full-history/synthetic-ledgers/2026-07-18-apply-load-20k/<profile>/` (named in `docs/dataset-sizes.json`), or ask the dataset owner. `plan` must fail when the constant is empty. A wrong value makes the one-hash check of PR 10 fail (D20).
 - Check that chunk 2 exists for each profile except `sac-6000`: `aws s3 ls <prefix>/<profile>/packs-v2/cold/ledgers/00000/`. The file names are `00000001.pack` and `00000002.pack` (`geometry.LedgerPackPath`, bucket = chunk / 1000). `sac-6000` has one chunk (Q7). The table keeps `numChunks = 2`, so PR 07 fails the `sac-6000` steps until Q7 is decided.
 - The estimate is at about 590 lines. If the count goes over 600, split: 06a = schema, `plan`, `validate`, `load.toml`; 06b = `estimate` and the `[estimate]` table.
-- Spec 7.3 says the runner adds `steps`. This plan has `plan` write the steps as `pending`, because `estimate` and the box need the list before the runner starts. Update spec 7.3 and record the change in the decision log (new D entry).
-- Spec 7.3 example `load` (`levelsRps`) changes to the D28 copy. Update the example in this PR.
+- `plan` writes every step as `pending` (spec 7.3), because `estimate` and the box need the list before the runner starts.
+- `campaign.json` mixes two key styles: snake_case under `load` (the `load.toml` names, D28) and camelCase elsewhere. The key-set test in `TestEmbeddedLoadValid` stops a drift between the two files.
+- The `[blaster]` table arrives in PR 10. Until then strict parsing rejects it, and `load` has no `blaster` key.
 - The `[estimate]` values are from one 2x run of the old binary. Replace them with the step times from the first PR 09 campaign.
 - `gosec` and `funlen` (100 lines, 50 statements) are on. Keep `Validate` split per section.

@@ -4,7 +4,7 @@
 |---|---|
 | Branch | `bench-campaign-v2/b2-bundle-workflow` |
 | Repository | stellar-experimental/stellar-rpc-benchmarks (base `main` at `3bc7c49`) |
-| Depends on | B1 (converter reads the bundle layout). PR 08 (the box pushes `bundles/<id>/` on branch `bundle/<id>`). Land before the first run with `publish=yes`. |
+| Depends on | B1 (converter reads the bundle layout). PR 08 (the box pushes `bundles/<id>/` on branch `bundle/<id>`, made from `main`). Land before the first campaign with `publish=yes`. |
 | Implements | D11, D16 (2), D17; spec Section 8 item 1, 10.2 B2 |
 | Estimate | about 140 non-test lines: `.github/workflows/bundle.yml` 70, `scripts/publish-bundle.sh` 70 |
 
@@ -47,7 +47,7 @@ laptop is in the path.
 | `runner-go.yml` | `runner/**` | Go vet and test of the runner (B4 removes it) |
 | `shellcheck.yml` | `runner/**`, `scripts/**` | `bash -n`, shellcheck on `runner/*.sh scripts/*.sh` |
 
-Nothing reacts to a bundle today (facts A6). A push to `bundle/**` starts no
+Nothing reacts to a bundle today (decision log, Section 2). A push to `bundle/**` starts no
 existing workflow: `tests.yml` and `deploy-pages.yml` filter on `main`.
 
 ### 4.2 `bundle.yml`
@@ -65,7 +65,7 @@ concurrency: {group: bundle-publish, cancel-in-progress: false}
 One job `publish`, `ubuntu-latest`, `timeout-minutes: 20`:
 
 1. `ID=${GITHUB_REF_NAME#bundle/}`. Fail unless `ID` matches
-   `^[A-Za-z0-9._-]+-[0-9]+$` (`<name>-<GitHub run id>`, spec Section 7.3).
+   `^[A-Za-z0-9._-]+-[0-9]+$` (`<name>-<GitHub run id>`, spec Section 5, D16 item 3).
 2. `actions/checkout@v4` with `ref: main`.
 3. `git fetch origin "$GITHUB_SHA"`, then `git archive FETCH_HEAD
    "bundles/$ID" | tar -x -C "$RUNNER_TEMP"`. Fail when the path is missing.
@@ -154,7 +154,7 @@ runs locally (the repository has no actionlint job).
 - `make test`; `make smoke`
 - `shellcheck scripts/publish-bundle.sh`; `bash -n scripts/publish-bundle.sh`
 - `actionlint .github/workflows/bundle.yml`
-- `git diff --stat main -- . ':!converter/tests/*' ':!tests/*' ':!*.md'` (D32)
+- `git diff --numstat main -- . ':!converter/tests/*' ':!tests/*' ':!*.md'`; sum the first column (D32)
 
 ## 9. Risks and open points
 
@@ -171,6 +171,7 @@ runs locally (the repository has no actionlint job).
 - The bundle branch holds test data and large files (`bench-serve.log`).
   They stay in git history after the branch delete until GitHub collects
   them. Accept, or let the box leave out large files (PR 08 risk).
-- Decision log: record the dispatch of `deploy-pages.yml`, the
+- D16 (2) already records the `gh workflow run` dispatch of
+  `deploy-pages.yml` and the `bundles/<id>/` path. Decision log: record the
   `bundle-publish` concurrency group and the copy of the push loop into
   `publish-bundle.sh`.

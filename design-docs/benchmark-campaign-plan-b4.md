@@ -5,8 +5,8 @@
 | Branch | `bench-campaign-v2/b4-remove-runner` |
 | Repository | stellar-experimental/stellar-rpc-benchmarks (base `main` after B2) |
 | Depends on | PR 08 (box bootstrap port in stellar-rpc), PR 09 (workflow on EC2; one campaign ran end to end), B2 (`scripts/publish-bundle.sh` replaces the `ingest.sh` push loop) |
-| Implements | D15, D16 (4); spec Section 8 item 5, Section 9 (last two rows), 10.2 B4 |
-| Estimate | about 15 non-test lines added (Makefile help text, `shellcheck.yml` paths). Removed: about 4,700 non-test lines (`runner/` 4,223 without tests and `*.md`, `scripts/ingest.sh` 454, `runner-go.yml` 38). |
+| Implements | D15, D16 (4), D32 (deletions do not count); spec Section 8 item 5, Section 9 (last row), 10.2 B4 |
+| Estimate | about 15 non-test lines added or modified (Makefile help text, `shellcheck.yml` paths); this is the D32 count. Removed, not counted: about 4,700 non-test lines (`runner/` 4,223 without tests and `*.md`, `scripts/ingest.sh` 454, `runner-go.yml` 38). |
 
 ## 1. Goal
 
@@ -127,15 +127,14 @@ No new test. The removal must leave these green:
 - `shellcheck scripts/*.sh`
 - `actionlint .github/workflows/*.yml` (local)
 - `git grep -n -e 'runner/' -e 'ingest.sh' -e 'make ingest'`
-- `git diff --stat main -- . ':!converter/tests/*' ':!tests/*' ':!*.md'`
-  (D32: additions only; see 9)
+- `git diff --numstat main -- . ':!converter/tests/*' ':!tests/*' ':!*.md'`;
+  sum the first column (D32: pure deletions do not count)
 
 ## 9. Risks and open points
 
-- D32 counts lines with `git diff --stat`. That count includes deletions
-  (about 4,700). A delete-only PR is easy to review, but the count is above
-  600. Record in the decision log that D32 counts added lines, or that
-  delete-only PRs are exempt.
+- D32 counts the first column of `git diff --numstat` only, so the about
+  4,700 deleted lines do not count, and the PR is at about 15 lines. The
+  reviewer still reads the list of deleted files: check it against 4.1.
 - Pubnet campaigns (`dataset.kind: pubnet`) ran only through the runner.
   After B4 nothing produces a new pubnet bundle. stellar-rpc campaigns are
   synthetic (`profiles[].datasetKind`). Confirm that no pubnet run is

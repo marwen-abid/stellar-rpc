@@ -13,10 +13,10 @@
 ## 1. Goal
 
 After this PR, an EC2 box runs a campaign from start to end, and no GitHub
-job waits for it. The user-data stub sets the ceiling, clones stellar-rpc and
-runs the bootstrap and the box script. The box script runs `bench-campaign
-run`, uploads each finished step to S3, pushes (`publish=yes`), posts to Slack
-and powers off.
+job waits for it. The user-data stub sets the ceiling, gets `campaign.json`
+from S3, clones stellar-rpc and runs the bootstrap and the box script. The box
+script runs `bench-campaign run`, uploads each finished step to S3, pushes
+(`publish=yes`), posts to Slack and powers off.
 
 ## 2. Scope
 
@@ -32,12 +32,12 @@ and powers off.
 ## 3. Out of scope (boundaries)
 
 - The workflow, `launch-box.sh`, `bench-campaign plan`/`estimate` calls, the
-  reaper and the CI job that runs these tests: PR 09.
+  upload of `campaign.json` before launch, the reaper and the CI job that runs
+  these tests: PR 09.
 - `slack-reaper.jq` and the reaper mode of `slack-payload.sh`: PR 09.
 - The `bundle/**` workflow in the benchmarks repository: B2.
-- Changes to `PE/bootstrap-common.sh`. `ec2-leg.yml` keeps using it with
-  `upload_result` and `RESULT_KEY`. The stub copies three of its
-  pieces; it does not source the file.
+- Changes to `PE/bootstrap-common.sh` (see Section 9). The stub copies three
+  of its pieces; it does not source the file.
 - Load-step tools (Blaster build, cache drop): PR 10, inside the runner.
 - `render-campaign-toml.sh`, `run-campaign.sh`, `slack-recap.jq`,
   `run-info.json`, the `published:` grep: not ported (spec Section 9).
@@ -46,15 +46,15 @@ and powers off.
 
 ### 4.1 `render-user-data.sh` (from #16, rewritten)
 
-Env in: `CAMPAIGN_ID`, `CAMPAIGN_JSON` (path), `RUNNER_REPO` (`owner/repo`),
-`RUNNER_COMMIT` (40 hex), `CEILING_MINUTES`, `RUN_URL`, `OUT` (default
-`/tmp/user-data.sh`). Out: `$OUT` and `$OUT.gz`. It writes `#!/usr/bin/env
-bash`, one `printf 'export K=%q\n'` line per value, `CAMPAIGN_JSON_B64`
-(base64 of the file), then `cat user-data-stub.sh`. It keeps `gzip -9` and the
-check `[ "$SIZE" -le 16384 ]` with the message `16384-byte EC2 limit`. It
-rejects a `RUNNER_COMMIT` that is not 40 hex characters and a
-`CEILING_MINUTES` that is not a positive integer. A full inline port gzips to
-8,465 bytes (review digest R15); the stub is smaller.
+Env in: `CAMPAIGN_ID`, `RUNNER_REPO` (`owner/repo`), `RUNNER_COMMIT` (40
+hex), `CEILING_MINUTES`, `OUT` (default `/tmp/user-data.sh`). Out: `$OUT` and
+`$OUT.gz`. It writes `#!/usr/bin/env bash`, one `printf 'export K=%q\n'` line
+for each of the four values, then `cat user-data-stub.sh`. There is no base64
+data (D16 item 4): PR 09 uploads `campaign.json` to
+`s3://stellar-rpc-bench/results/<id>/campaign.json` before the launch (D31).
+It keeps `gzip -9` and the check `[ "$SIZE" -le 16384 ]` with the message
+`16384-byte EC2 limit`. It rejects a `RUNNER_COMMIT` that is not 40 hex
+characters and a `CEILING_MINUTES` that is not a positive integer.
 
 ### 4.2 `user-data-stub.sh`
 
@@ -64,8 +64,9 @@ rejects a `RUNNER_COMMIT` that is not 40 hex characters and a
    2>/dev/console) 2>&1` (from `bootstrap-common.sh` line 15).
 3. `BOOT_EPOCH=$(date +%s)`; `HOME=/root USER=root`; apt `jq git curl
    ca-certificates unzip`; the AWS CLI (apt, else the v2 bundle, from #16).
-4. `git fetch --depth 1 https://github.com/$RUNNER_REPO $RUNNER_COMMIT` into
-   `/root/stellar-rpc`; decode `CAMPAIGN_JSON_B64` to `/root/campaign.json`.
+4. `aws s3 cp s3://stellar-rpc-bench/results/$CAMPAIGN_ID/campaign.json
+   /root/campaign.json`. Then `git fetch --depth 1
+   https://github.com/$RUNNER_REPO $RUNNER_COMMIT` into `/root/stellar-rpc`.
 5. `bash $BC/box-bootstrap.sh /root/campaign.json`, then `exec bash
    $BC/run-box.sh /root/campaign.json`.
 
@@ -176,7 +177,8 @@ secret sets `PUSH_STATUS=no-token` or skips Slack.
 `post-slack.sh` (#17) stays as is (`curl --max-time 30`, degrades to a warning).
 `slack-payload.sh` env in: `CAMPAIGN_JSON`, `S3_PREFIX`, `S3_STATUS`,
 `PUSH_STATUS`, `RUNNER_EXIT`, `BOX_ID`, `CEILING_EPOCH`, `RUN_URL`,
-`AWS_REGION`. It keeps `s3_prefix_url` and `fmt_epoch_hm` from #17 and runs
+`AWS_REGION`. `run-box.sh` builds `RUN_URL` from `RUNNER_REPO` and the GitHub
+run id at the end of `id`, because the user-data does not carry it. It keeps `s3_prefix_url` and `fmt_epoch_hm` from #17 and runs
 `jq -f slack-campaign.jq --slurpfile c "$CAMPAIGN_JSON"`. The card holds: the
 id; `ref` and `commit`; machine and close interval; one line per step with
 status and `error` (cut to 200 characters); the S3 prefix link; the log keys
@@ -208,10 +210,11 @@ script's text (spec Section 11 rule 9).
 
 | Test | File | Proves | How |
 |---|---|---|---|
-| `test_user_data_quotes_and_compresses` | `test_user_data.py` | Preamble quoting, gzip round trip, size under cap | From #16 `test_box.py`; runs only the preamble lines through `bash -c`. |
+| `test_user_data_quotes_and_compresses` | `test_user_data.py` | Preamble quoting, gzip round trip, size under cap, only the four values and no base64 data | From #16 `test_box.py`; run the whole rendered file with a `shutdown` stub that prints `env` and exits. |
 | `test_user_data_rejects_oversize`, `test_user_data_rejects_bad_commit` | `test_user_data.py` | 16 KB cap; input check | From #16 (20,000 random bytes); `RUNNER_COMMIT=main`. |
 | `test_stub_sets_ceiling_first` | `test_user_data.py` | Ceiling before any other command | Run the rendered file with stubs for `shutdown`, `apt-get`, `git`, `aws`, `logger`, `bash` target; `calls()[0]` is `shutdown -P +N`. |
-| `test_stub_clone_failure_powers_off` | `test_user_data.py` | Early failure: log upload, `poweroff` | `git` stub exits 1. |
+| `test_stub_gets_campaign_from_s3` | `test_user_data.py` | `aws s3 cp` of `results/<id>/campaign.json` comes before the `git` fetch | Same stubs; check the order in `calls()`. |
+| `test_stub_clone_failure_powers_off` | `test_user_data.py` | Early failure: log upload, `poweroff` | `git` stub exits 1; also `aws s3 cp` of `campaign.json` exits 1. |
 | `test_bootstrap_refuses_non_instance_store`, `test_bootstrap_fsync_probe`, `test_bootstrap_skips_mkfs_and_mount` | `test_bootstrap.py` | Model check; `GB/s` fails unless `FSYNC_PROBE_WARN_ONLY=1`; idempotent re-run | Stubs `lsblk`, `dd`, `blkid`, `mountpoint`, `mkfs.ext4`, `mount`; `MOUNT` = temp dir. |
 | `test_finish_order_success` | `test_box.py` | S3, push, Slack, box log, `poweroff`, in order | Fake `bench-campaign` writes two `ok` steps; assert the order in `calls()`. |
 | `test_step_uploaded_before_exit` | `test_box.py` | Per-step upload | Fake runner writes step 1 `ok`, sleeps 3 s; `WATCH_SECONDS=1`; the `aws s3 cp` of step 1 comes before the runner exits. |
@@ -239,21 +242,19 @@ script's text (spec Section 11 rule 9).
 - `shellcheck $BC/*.sh`; `bash -n $BC/*.sh`
 - `bash $BC/render-user-data.sh` on a real PR 06 `plan` output; record the gzipped size.
 - `go build ./...`; `make go-check-branch BASE=feature/full-history` (no Go change expected).
-- `git diff --stat feature/full-history -- . ':!*_test.go' ':!*/tests/*' ':!*.md'` (D32).
+- `git diff --numstat feature/full-history -- . ':!*_test.go' ':!*/tests/*' ':!*.md'`; sum the first column (D32).
 
 ## 9. Risks and open points
 
 - Q2 blocks the first EC2 run: it needs the store and the IAM grant.
 - Size: 540 lines. Over 600, split into 08a `box-bootstrap` (bootstrap, stub,
   render; about 190) and 08b `box-finish` (`run-box.sh`, Slack; about 350).
-- Spec Section 9 removes `upload_result` and `RESULT_KEY`, but the kept
-  `ec2-leg.yml` and `perf-eval/gather` read that object
-  (`harness/env.go`, `PollerConfig.ResultKey`). See PR 09.
+- `PE/bootstrap-common.sh` keeps `upload_result` and `RESULT_KEY`, because
+  `ec2-leg.yml` and `load-test-coordinator.yml` use them (spec Section 9).
 - `bench-serve.log` in a load step directory is pushed. Check its size;
   GitHub rejects files over 100 MB.
-- RocksDB builds from source on each box (not measured); the PR 06
-  `[estimate]` setup margin must cover it. `RUNNER_COMMIT` must be
-  fetchable anonymously; verify.
-- New decisions to record in the decision log in this PR: the `bundles/<id>/`
-  path in the bundle branch (contract with B2); the 30-minute finish margin;
-  native libs from `ref`; `RUSTUP_TOOLCHAIN`.
+- RocksDB builds from source on each box (not measured); `setup_minutes`
+  must cover it. `RUNNER_COMMIT` must be fetchable anonymously; verify.
+- The `bundles/<id>/` path, the branch from `main`, the 30-minute finish
+  margin, the native libraries from `ref` and `RUSTUP_TOOLCHAIN` are in spec
+  6.6 and D16. Change them only with the spec and B2.

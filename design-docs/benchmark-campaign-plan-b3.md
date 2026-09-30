@@ -44,18 +44,21 @@ tx-hash index size next to the cold `getTransaction` verdict. D13 ends here.
 
 ### 4.1 Inputs per load step (spec Sections 7.1, 7.4)
 
-- `load.json`: `schemaVersion`, `step`, `blasterCommit`, `serveReadySeconds`,
-  `benchServeExitCode`, `gomaxprocs`, `status`, `error`, `runs[]` with
-  `loadLevelRps`, `rngSeed`, `mix`, `blasterArgs`, `pageCache`, `serveFresh`,
-  `cpuSeconds`, `status`, `error`.
+- `load.json` (spec 7.1): `schemaVersion`, `step`, `blasterCommit`,
+  `startedAt`, `finishedAt`, `status`, `error`, `runs[]`. Each run has
+  `loadLevelRps`, `rngSeed`, `pageCache` (`dropped` or `kept`),
+  `serveReadySeconds`, `benchServeExitCode`, `cpu` (`benchServeGomaxprocs`,
+  `blasterGomaxprocs`, `benchServeSeconds`, `blasterSeconds`), `startedAt`,
+  `finishedAt`, `status` (`ok`, `failed` or `skipped`) and `error`.
 - `<level>rps/blaster.json` at Blaster `aadc1a1` (verified in
   `internal/run/metrics/results.go`): top keys `start`, `end`, `seed`,
   `duration_seconds`, `aborted`, `endpoints`. Per endpoint: `total_requests`,
   `success`, `errors`, `target_rps`, `percentiles_ms` (keys `p50.0`, `p95.0`,
-  `p99.0`, `p99.9`), `timeline[]` (`target_rps`, `success`, `errors`,
-  `error_rate_pct`, `p50_ms`, `p95_ms`, `p99_ms`, `p99.9_ms`); optional
-  `limit`, `traffic_profile`, `error_types` (`error_msg`, `error_code`,
-  `count`, `time_first_seen`, `time_last_seen`), `archetypes` (getEvents).
+  `p99.0`, `p99.9`: `fmt.Sprintf("p%.1f", p)`); optional `timeline[]`
+  (`target_rps`, `success`, `errors`, `error_rate_pct`, `p50_ms`, `p95_ms`,
+  `p99_ms`, `p99.9_ms`; left out when no window completed), `limit`,
+  `traffic_profile`, `error_types` (`error_msg`, `error_code`, `count`,
+  `time_first_seen`, `time_last_seen`), `archetypes` (getEvents).
 - `<level>rps/blaster.toml`: `rng_seed`.
 - `metrics-before.txt`, `metrics-after.txt`: Prometheus text.
 
@@ -63,8 +66,8 @@ tx-hash index size next to the cold `getTransaction` verdict. D13 ends here.
 
 ```python
 BLASTER_TOP = {"start", "end", "seed", "duration_seconds", "aborted", "endpoints"}
-BLASTER_ENDPOINT = {"total_requests", "success", "errors", "target_rps", "percentiles_ms", "timeline"}
-BLASTER_OPTIONAL = {"limit", "traffic_profile", "error_types", "archetypes"}
+BLASTER_ENDPOINT = {"total_requests", "success", "errors", "target_rps", "percentiles_ms"}
+BLASTER_OPTIONAL = {"timeline", "limit", "traffic_profile", "error_types", "archetypes"}
 SUPPORTED_BLASTER = {"<full aadc1a1 hash>"}   # decide with Q1
 
 def read_blaster(path, commit) -> dict        # BlasterSchemaError on a key set mismatch
@@ -73,8 +76,8 @@ def storage_share(before, after) -> dict      # {method: {"ratio", "by_store_tie
 def build_load(bundle, steps, targets) -> dict
 ```
 
-Contract check (spec Section 7.4, review C7): a top-level or per-endpoint key
-outside the two sets fails with `BlasterSchemaError(<commit>, <keys>)`. A
+Contract check (spec Section 7.4): a top-level or per-endpoint key outside
+the sets, or a missing required key, fails with `BlasterSchemaError(<commit>, <keys>)`. A
 `blasterCommit` outside `SUPPORTED_BLASTER` gives a warning. `seed` in
 `blaster.json` must equal `rng_seed` in `blaster.toml` (`tomllib`, Python
 3.11); else fail.
@@ -89,15 +92,15 @@ Storage share (spec Section 6.4): per method M, Δ `_sum` of
 and `tier`, divided by Δ `_sum` of
 `soroban_rpc_json_rpc_request_duration_seconds{endpoint=M}` summed over
 `status`. Keep the per `store`,`tier` ratios. A ratio above 1 is a
-timeout signal (the handler keeps running); keep it and warn. The exact
-metric names come from PR 04; check them there.
+timeout signal (the handler keeps running); keep it and warn. The metric
+names and labels are fixed by D35 (PR 04 implements them).
 
 ### 4.3 Run JSON `load` section
 
 ```jsonc
 "load": { "cold"|"hot": { "<unit>": {
   "r<level>": {                     // one per load level, ascending
-    "page_cache": "dropped", "serve_fresh": true, "aborted": V(bool as 0/1),
+    "page_cache": "dropped", "serve_ready_s": V, "aborted": V(bool as 0/1),
     "methods": { "<method>": {
       "target_rps": 300, "requests": V, "error_rate": V, "error_types": {"<text>": int},
       "p50_ms": V, "p95_ms": V, "p99_ms": V, "p999_ms": V,
@@ -105,12 +108,12 @@ metric names come from PR 04; check them there.
       "timeline": [ ...windows of rep 1... ],
       "archetypes": { "<name>": { "p99_ms": V, "error_rate": V } }   // getEvents only
     }},
-    "cpu_s": {"bench_serve": V, "blaster": V}, "gomaxprocs": {...}
+    "cpu_s": {"bench_serve": V, "blaster": V}, "gomaxprocs": {"bench_serve": int, "blaster": int}
   },
   "verdicts": { "<method>": { "level": "r500", "p99_ms": 18.2, "threshold_ms": 20,
                               "error_rate": 0.002, "max_error_rate": 0.01,
                               "aborted": false, "pass": true, "reason": "" } },
-  "txhash_index_chunks": 2, "dataset_bytes": 123   // cold only, from the ingest step
+  "txhash_index_chunks": 2, "dataset_bytes": 123   // cold only: results.json parameters.txhashIndexChunks, campaign.json steps[].datasetBytes
 }}}
 ```
 
@@ -118,7 +121,9 @@ metric names come from PR 04; check them there.
 `validate_run` checks it. Unit and tier come from `campaign.json` `steps[]`
 (`profile`, `startChunk`, `tier`, `loadLevelRps`), as in B1. Only `load`
 steps with `status: ok` convert; others warn. A run inside `load.json` with
-`status: failed` is left out with a warning.
+`status: failed` or `skipped` is left out with a warning. `cpu_s` and
+`gomaxprocs` come from `runs[].cpu`; `serve_ready_s` from
+`runs[].serveReadySeconds`.
 
 ### 4.4 `docs/targets.json`
 
@@ -130,7 +135,7 @@ Add under `query_load` (schema stays 2; the key is additive):
                              "getEvents": "events", "getLedgers": "ledgers"}}
 ```
 
-The p99 target per method and tier is `sla.p99_ns[method_qtype[M]][tier]`
+The p99 target per method and tier is `query_load.sla.p99_ns[method_qtype[M]][tier]`
 (one copy of each number). `verdict_level_rps` is Q4: 500 is the Standard
 tier today. `max_error_rate` 0.01 is a proposal; decide with Q5. A bundle
 without the verdict level gives no verdict and a warning.
@@ -160,7 +165,7 @@ blended measurement.
   archetype table, a per-window p99 line chart from `timeline`, and the
   tx-hash index chunk count next to the cold `getTransaction` row. The
   `queries` renderer stays for old runs.
-- `docs/summary.js`: extend `queryVerdicts` (line 699 area) to read
+- `docs/summary.js`: extend `queryVerdicts` (line 701) to read
   `load.<tier>.<unit>.verdicts` when `D.load` exists.
 - `tests/smoke/smoke.mjs`: count one more section for a run with `load`.
 
@@ -187,7 +192,7 @@ metrics dumps.
 | Test | Proves |
 |---|---|
 | `test_load_section_shape` | Units, tiers, levels, methods; `validate_run` passes |
-| `test_blaster_key_mismatch_fails` | Extra or missing key → `BlasterSchemaError` naming the commit |
+| `test_blaster_key_mismatch_fails` | Extra or missing key → `BlasterSchemaError` naming the commit; no `timeline` passes |
 | `test_unknown_blaster_commit_warns` | Warning, conversion continues |
 | `test_seed_mismatch_fails` | `seed` ≠ `rng_seed` |
 | `test_error_rate_fails_verdict` | p99 under target, errors 2% → `pass: false`, `reason: errors` |
@@ -196,7 +201,8 @@ metrics dumps.
 | `test_no_verdict_without_level` | Bundle without 500 rps → no verdict, warning |
 | `test_storage_share_from_deltas` | Ratio from the two dumps, summed over `status` and `store` |
 | `test_error_types_kept` | JSON-RPC text keys and counts |
-| `test_failed_load_step_skipped` | `status: failed` → warning, no data |
+| `test_failed_load_step_skipped` | Step `status: failed`, or run `failed`/`skipped` → warning, no data |
+| `test_load_json_keys` | A `load.json` with a key outside spec 7.1 fails; `schemaVersion: 2` fails (D29) |
 | `test_txhash_index_chunks_attached` | Cold unit carries the ingest step's `txhashIndexChunks` |
 | smoke `load` group | `tests/smoke/smoke.mjs` renders the `load` section and verdict rows of the new test run |
 
@@ -217,7 +223,7 @@ metrics dumps.
 
 - `make test`; `make smoke`
 - Convert the first real PR 10 bundle; open it with `make serve`.
-- `git diff --stat main -- . ':!converter/tests/*' ':!tests/*' ':!*.md'` (D32)
+- `git diff --numstat main -- . ':!converter/tests/*' ':!tests/*' ':!*.md'`; sum the first column (D32)
 
 ## 9. Risks and open points
 
@@ -226,7 +232,7 @@ metrics dumps.
 - Q3: with production shapes, the getEvents and getLedgers targets assume
   other page sizes. Mark the verdicts as provisional in the site until Q3 is
   decided.
-- The storage metric names depend on PR 04. Verify on a real dump.
+- The storage metric names are those of D35. Verify them on a real dump.
 - Size: 520 lines. If the site work grows past 600, split: B3a converter
   and `targets.json` (about 270), B3b site (about 250).
 - Q9: a cold `getTransaction` verdict on a 2-chunk index is not production

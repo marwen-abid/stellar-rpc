@@ -6,7 +6,7 @@
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
 | Depends on | PR 03 (`results.json` writer), benchmarks B1 (the converter reads `results.json`) merged and deployed. D12, D34. PR 12 (`freeze`) if it merged first: it reuses the same sink. |
 | Implements | D12 (last sentence: remove the CSV files), D34 (`<group>.<row>` names stay after the CSV writers go); spec 6.1 item 2, 7.1 |
-| Estimate | About 170 changed non-test lines (`git diff --stat`, insertions plus deletions): `csvsink.go` → `sink.go` about 110 (70 removed, 40 renamed), `command.go` 20, `cold.go` 12, `hot.go` 12, `rss.go` 10, `doc.go` 6 |
+| Estimate | About 170 changed non-test lines, most of them deletions. D32 counts only the first column of `git diff --numstat` (added and modified lines): about 60. `csvsink.go` → `sink.go` about 110 (70 removed, 40 renamed), `command.go` 20, `cold.go` 12, `hot.go` 12, `rss.go` 10, `doc.go` 6 |
 
 ## 1. Goal
 
@@ -38,7 +38,7 @@ The benchmarks converter tests still pass.
 
 These parts feed `results.json`. Keep them and their behavior:
 - `sample`, `series`, `series.observe`.
-- `rowKey{file, row string}` → rename to `rowKey{group, row string}`. The group is the old CSV file stem: `ledgers`, `txhash`, `events`, `hot`, `driver`. D34 names each measurement `<group>.<row>`, for example `driver.ingest_total` and `ledgers.write`. The key must keep the group, because `write` and `finalize` occur in three groups.
+- `rowKey{file, row string}` → rename to `rowKey{group, row string}`. The group is the old CSV file stem: `driver`, `hot`, `ledgers`, `txhash`, `events`. D34 names each measurement `<group>.<row>`, for example `driver.ingest_total` and `ledgers.write`. The key must keep the group, because `write`, `finalize` and `term_index` occur in three groups (D34).
 - `fileSpec`, `fileSpecs` → rename to `groupSpec`, `groupSpecs`. Keep the row order: `results.json` lists the measurements in this order.
 - The row constants (`driverBackfillWall`, `driverIndexRebuild`, `driverChunkTotal`, `driverTotalSuffix`, `driverColdExtract`, `driverIngestTotal`, `driverRunWall`, `driverPaceLag`, `coldType*`, `coldStage*`), `fileHot`, `fileDriver` → `groupHot`, `groupDriver`.
 - Every `ingest.MetricSink` and `observability.Metrics` method (`HotPhase`, `ColdIngest`, `ColdChunkTotal`, `ColdExtract`, `IngestStage`, `Freeze`, `Rebuild`, `LastCommitted` and the no-op methods), `recordPaceLag`, `lastCommittedSeq`, `sumDriver`.
@@ -80,7 +80,7 @@ Today `recordPeakRSS` stores the byte count as a `time.Duration` sample on row `
 | `P/bench/README.md` (PR 03) | modify | remove the CSV note (not counted) | — |
 | `design-docs/benchmark-campaign.md` | modify | spec 6.1 item 2, 7.1 (not counted) | — |
 
-Use `git mv` for the rename so `git diff --stat -M` counts only the changed lines.
+Use `git mv` for the rename so `git diff --numstat -M` counts only the changed lines.
 
 ## 6. Tests
 
@@ -91,7 +91,7 @@ Use `git mv` for the rename so `git diff --stat -M` counts only the changed line
 | `TestSinkExactOutput` | `P/bench/sink_test.go` | Replaces `TestCSVSinkExactOutput`: the groups and rows equal the old CSV rows (same names, `n`, `n_items`, percentiles) | Assert on `sink.groups()`. Keep the old expected numbers. |
 | `TestSinkPaceLag*`, `TestSinkHotIngestTotal`, `TestSinkEmpty`, `TestSinkLastCommitted` | `P/bench/sink_test.go` | The renamed `TestCSVSink*` tests keep their checks | Replace `mustWriteCSVs` with a helper `mustGroups(t, s) map[string]map[string]row`. |
 | `TestResultsPeakRSS` | `P/bench/rss_test.go` | `driver.peak_rss` is `kind: value`, `unit: bytes`, same number | Replaces the two `writeCSVs` calls in `rss_test.go`; read `results.json` with PR 03's reader helper. |
-| Existing `TestRunColdFromPack`, `TestRunColdMultiChunk`, `TestRunHotFromPack`, `TestRunHotPaced` | `P/bench/bench_test.go` | Same checks through `results.json` | Replace the 10 `readCSV` calls with PR 03's results reader (if PR 03 adds none, add `readResults(t, dir) map[string]measurement` keyed by `<group>.<row>`). Remove `readCSV`. |
+| Existing `TestRunColdFromPack`, `TestRunColdMultiChunk`, `TestRunHotFromPack`, `TestRunHotPaced` | `P/bench/bench_test.go` | Same checks through `results.json` | Replace the `readCSV` calls (9 at `91f158b`) with PR 03's results reader (if PR 03 adds none, add `readResults(t, dir) map[string]measurement` keyed by `<group>.<row>`). Remove `readCSV`. |
 | `TestCampaignEndToEnd` (PR 07) | `P/bench/campaign_e2e_test.go` | Step directories hold no `*.csv` | Add one glob check. |
 | Converter tests | stellar-rpc-benchmarks `converter/tests` | The converter still passes on its own tests and converts a bundle without CSV files | `make test` (`python3 -m unittest discover converter/tests`) and `make smoke` at the B1 commit. Then convert a bundle from `TestCampaignEndToEnd` (keep it with `BENCH_CAMPAIGN_KEEP=<dir>`) with the B1 converter command. |
 
@@ -108,7 +108,7 @@ go build ./...
 go vet ./...
 go test -race ./cmd/stellar-rpc/internal/rpcv2/bench/...
 make go-check-branch BASE=feature/full-history
-git diff --stat -M feature/full-history -- . ':!*_test.go' ':!*.md'
+git diff --numstat -M feature/full-history -- . ':!*_test.go' ':!tests/' ':!*.md'   # D32: first column
 # in stellar-rpc-benchmarks at the B1 commit
 make test && make smoke
 ```
@@ -116,8 +116,8 @@ make test && make smoke
 ## 9. Risks and open points
 
 - Check first that B1 is merged and deployed. The converter at `3bc7c49` reads only CSV (`convert.py` matches `driver.csv` rows by name and reads `peak_rss_bytes` from `total_ns`). A bundle without CSV fails there.
-- Check that B1 reads the D34 names (`driver.ingest_total`, `ledgers.write`). The converter today derives `ledgers_per_s` from `*_total.n_items`; `results.json` must carry `items` (spec 7.2 rule 4).
+- Check that B1 reads the D34 names (`driver.ingest_total`, `ledgers.write`). The converter today derives `ledgers_per_s` from `n_items`. After B1 it derives the hot `ledgers_per_s` from `driver.run_wall` `items` (spec 7.2 rule 4), so `results.json` must keep `items` on that row.
 - The shape of PR 03's writer is not known yet. This plan assumes that PR 03 builds `results.json` from `sink.files()`. If PR 03 builds it another way, keep what that writer reads and remove the rest.
-- The rename `csvSink` → `sink` touches every method receiver. With `git mv` and `-M`, the diff counts only the lines that change. If a reviewer wants a smaller diff, keep the type name and change only the file name and the comments.
+- The rename `csvSink` → `sink` touches every method receiver. With `git mv` and `-M`, the diff counts only the lines that change; the renamed receivers count as modified lines (D32). If a reviewer wants a smaller diff, keep the type name and change only the file name and the comments.
 - No other file in stellar-rpc at `91f158b` reads the CSV files (`git grep` for `.csv` in scripts, workflows and docs is empty). The old box scripts on the #15 to #20 branches do not read them either.
 - Spec 7.1 keeps the line "Until PR 11, the ingest step directories also hold the CSV files". Remove it in this PR. Add a decision-log note under D12 that the removal is done.

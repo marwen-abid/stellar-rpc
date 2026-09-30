@@ -4,8 +4,8 @@
 |---|---|
 | Branch | `bench-campaign-v2/07-campaign-run` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
-| Depends on | PR 03 (`results.json`, `--paced-ledgers`), PR 06 (`internal/campaign`, `internal/plan`). PR 02 for the existence check (the runner removes the dataset directory first, so PR 07 works without it). Q7 decides the `sac-6000` result. D33 is Proposed. |
-| Implements | D15 (build, step loop, bundle), D16 item 1 (runner side), D21, D33, D34 (reads `results.json` status only); spec 4, 6.1 item 4, 6.5, 7.1, 7.3 |
+| Depends on | PR 03 (`results.json`, `--paced-ledgers`), PR 06 (`internal/campaign`, `internal/plan`). PR 02 for the existence check (the runner removes the dataset directory first, so PR 07 works without it). Q7 decides the `sac-6000` result. |
+| Implements | D15 (build, step loop, bundle), D16 item 1 (runner side), D21, D33, D34 (reads `results.json` status only); spec 4, 6.1 item 4, 6.5, 7.1, 7.3 (`steps[].datasetBytes`) |
 | Estimate | About 600 non-test lines: `internal/run/run.go` 170, `steps.go` 95, `source.go` 110, `fetch.go` 90, `machine.go` 55, `lock.go` 35, `main.go` +45 |
 
 ## 1. Goal
@@ -26,7 +26,7 @@ Load steps are marked `skipped` until PR 10 fills the hook.
 
 ## 3. Out of scope (boundaries)
 
-- The load step body, Blaster, `--page-cache` and `blasterCommit`: PR 10. This PR adds the hook only.
+- The load step body, Blaster, `--page-cache`, `--profile`, the `profile = true` handling (`--cpuprofile` on bench steps, spec 6.9) and `blasterCommit`: PR 10. This PR adds the hook only.
 - The S3 upload of the bundle, the push, Slack and `poweroff`: the box script, PR 08 (D16). The runner never uploads.
 - `bench-ingest freeze`: PR 12. This PR runs it when the binary has it.
 - `--resume`, the golden preparation, `leg.json` sentinels, `tar`, `publish.Run` and `metadata.json`: D15 rejects them.
@@ -52,14 +52,14 @@ Do not take `internal/targets`, `cmd/campaign/queryload.go`, `internal/preflight
 
 ```
 bench-campaign run [--root /mnt/nvme/bench] [--repo <git url or path>] [--binary <path>] \
-  [--profile] <bundle>/campaign.json
+  [--binary-commit <sha>] <bundle>/campaign.json
 ```
 
 - The bundle directory is `dirname(campaign.json)`. The runner writes `steps/<name>/` and `logs/` there. PR 08 relies on this.
 - `--root` default `/mnt/nvme/bench` (spec 6.6). Datasets: `<root>/<profile>/run<N>/{cold,hot}`. Packs: `<root>/<profile>/packs`.
 - `--repo` default: `git -C <runner checkout> remote get-url origin`. Tests pass a local path.
 - `--binary`: use this stellar-rpc binary and skip the clone and the build. For laptops and the e2e test. The runner does not parse `<binary> version` output. It records `commit` from `--binary-commit`, which `--binary` requires.
-- `--profile` overrides `load.profile`. With it, bench steps get `--cpuprofile <step dir>/cpu.pprof` (spec 6.9).
+- PR 10 adds `--page-cache drop|keep` and `--profile` (spec 6.5). This PR ignores `load.profile` and passes no `--cpuprofile`.
 - Exit 0: every step `ok` or `skipped`. Exit 1: one or more steps `failed`, or the runner got SIGINT/SIGTERM. Exit 2: an error before the first step (bad `campaign.json`, lock held, clone or build failed, the binary has no `bench-ingest`). On exit 2 every step stays `pending`.
 
 ### 4.3 Startup order
@@ -103,23 +103,25 @@ func Execute(ctx context.Context, c *campaign.Campaign, env runEnv) (failed int)
 - Before a step: `status = running`, `startedAt`, `campaign.Write`. After: `ok` or `failed`, `error`, `finishedAt`, `campaign.Write`.
 - Each child process: `exec.CommandContext`, stdout and stderr to `logs/<step name>.log`. `cmd.Cancel` sends SIGTERM. `cmd.WaitDelay` is 60 s, then SIGKILL.
 - On SIGINT or SIGTERM to the runner: cancel the context, mark the running step `failed` with `error: "runner interrupted"`, write `campaign.json`, exit 1. Leave the later steps `pending`. A SIGKILL to the runner leaves the step `running`; the box marks it `crashed` (D16).
-- After the last step of a profile: `os.RemoveAll(<root>/<profile>)` (spec 4 item 9). Before it, set `steps[].datasetBytes` for each ingest and freeze step of the profile. `datasetBytes` is a new field; add it to the PR 06 types and to spec 7.3 (PR 09 needs it: "the first run records the size of each hot dataset").
+- After the last step of a profile: `os.RemoveAll(<root>/<profile>)` (spec 4 item 7). It removes the datasets and the packs. Before it, set `steps[].datasetBytes` (`dirBytes` of the step's dataset) for each ingest and freeze step of the profile (spec 7.3). PR 06 has the field. PR 09 needs it: "the first campaign records the size of each hot dataset".
 - At the end: `finishedAt`, `campaign.Write`.
 
 ### 4.7 Step commands (`steps.go`)
 
 Ingest cold (spec 6.1 item 4, D21):
 ```
-<bin> bench-ingest cold --source pack --pack-dir <root>/<p>/packs --start-chunk 1 --num-chunks 2 \
+<bin> bench-ingest cold --source pack --pack-dir <root>/<p>/packs --start-chunk <s> --num-chunks <n> \
   --workers <inputs.workers> --cold-out-dir <root>/<p>/run<N>/cold --out <bundle>/steps/<name>
 ```
 Ingest hot:
 ```
-<bin> bench-ingest hot --source pack --pack-dir <root>/<p>/packs --start-chunk 1 --num-chunks 2 \
+<bin> bench-ingest hot --source pack --pack-dir <root>/<p>/packs --start-chunk <s> --num-chunks <n> \
   --paced-ledgers <inputs.pacedLedgers> --close-interval <inputs.closeInterval> \
   --hot-dir <root>/<p>/run<N>/hot --out <bundle>/steps/<name>
 ```
-Freeze (spec 6.8, PR 12): `<bin> bench-ingest freeze --dataset <root>/<p>/run<N>/hot --workers <w> --out <step dir>`.
+Freeze (spec 6.8, PR 12): `<bin> bench-ingest freeze --dataset <root>/<p>/run<N>/hot --workers <inputs.workers> --out <step dir>`.
+
+`<s>` and `<n>` are the step's `startChunk` and `numChunks` (1 and 2 from the PR 06 table; the e2e test uses 0 and 2).
 
 - Remove the target dataset directory before each ingest step. PR 02 makes `bench-ingest` refuse an existing catalog, and there is no resume.
 - Success: exit code 0 and `<step dir>/results.json` has `status: ok` (PR 03, spec 7.2 rule 7). Else `failed`. The error is `results.json` `error` when it is set, else `exit status <n>`. The runner reads only `status` and `error`. It does not read measurement names (D34).
@@ -136,7 +138,6 @@ Freeze (spec 6.8, PR 12): `<bin> bench-ingest freeze --dataset <root>/<p>/run<N>
 | `cmd/bench-campaign/internal/run/run.go` | new | `Execute`, needs, status writes, signals, cleanup | 170 |
 | `cmd/bench-campaign/internal/run/steps.go` | new | argv per kind, `results.json` check, load hook | 95 |
 | `cmd/bench-campaign/internal/run/machine.go` | new | `collectMachine` | 55 |
-| `cmd/bench-campaign/internal/campaign/campaign.go` | modify | `DatasetBytes` field | 2 |
 | `cmd/stellar-rpc/internal/rpcv2/bench/campaign_e2e_test.go` | new | e2e test (test code) | — |
 | `cmd/bench-campaign/README.md` | modify | `run`, bundle layout (not counted) | — |
 
@@ -144,7 +145,7 @@ Freeze (spec 6.8, PR 12): `<bin> bench-ingest freeze --dataset <root>/<p>/run<N>
 
 | Test | Package/file | What it proves | How |
 |---|---|---|---|
-| `TestCampaignEndToEnd` | `cmd/stellar-rpc/internal/rpcv2/bench/campaign_e2e_test.go` | On small packs, `run` writes a valid bundle: `campaign.json` passes `validate`, each ingest step is `ok` with `results.json`, `logs/` holds one log per step, the datasets and packs are gone after the profile | Build the two binaries with `go build` into `t.TempDir()` (`./cmd/stellar-rpc/rpcv2`, `CGO_ENABLED=0 ./cmd/bench-campaign`). Write packs with the existing helper `writeSourcePack(t, <tmp>/prefix/test/packs-v2/cold, chunk, chunk.LedgersPerChunk)` for chunks 0 and 1. Write `campaign.json` with `plan`, then set one profile `test` (startChunk 0, numChunks 2), `packsPrefix` `file://<tmp>/prefix`, `closeInterval` `600ms`, `pacedLedgers` 10. Run `bench-campaign run --root <tmp>/root --binary <bin> --binary-commit test`. Skip under `testing.Short()`. |
+| `TestCampaignEndToEnd` | `cmd/stellar-rpc/internal/rpcv2/bench/campaign_e2e_test.go` | On small packs, `run` writes a valid bundle: `campaign.json` passes `validate`, each ingest step is `ok` with `results.json` and a non-zero `datasetBytes`, `logs/` holds one log per step, the datasets and packs are gone after the profile | Build the two binaries with `go build` into `t.TempDir()` (`./cmd/stellar-rpc/rpcv2`, `CGO_ENABLED=0 ./cmd/bench-campaign`). Write packs with the existing helper `writeSourcePack(t, <tmp>/prefix/test/packs-v2/cold, chunk, chunk.LedgersPerChunk)` for chunks 0 and 1. Write `campaign.json` with `plan`, then set one profile `test` (startChunk 0, numChunks 2), `load.packs_prefix` `file://<tmp>/prefix`, `closeInterval` `600ms`, `pacedLedgers` 10. Run `bench-campaign run --root <tmp>/root --binary <bin> --binary-commit test`. Skip under `testing.Short()`. |
 | `TestCampaignEndToEndFreeze` | same file | The freeze step is `skipped` when the binary has no `bench-ingest freeze`, else `ok` | Same run; the expected status follows `__complete bench-ingest ""`. |
 | `TestKilledStepLeavesValidCampaign` | `run/run_test.go` | A step whose child dies from SIGKILL is `failed`; `campaign.json` stays valid; later steps still run | Fake binary: the test binary re-executes itself (`TestMain` checks `BENCH_CAMPAIGN_FAKE=1`) and acts as `stellar-rpc-v2`: writes `results.json` or kills itself. |
 | `TestRunnerKilledMidStep` | `run/run_test.go` | SIGKILL to the runner leaves a readable `campaign.json` with the step `running` (the box marks it `crashed`) | Start the runner as a child process with the fake binary that sleeps; kill it; `campaign.Read` and `Validate`. |
@@ -178,6 +179,6 @@ Run one local campaign on a laptop with `--binary` and a `file://` prefix, and r
 - CI: `.github/workflows/stellar-rpc.yml` runs `go test -race -timeout 25m ./cmd/stellar-rpc/...`. The e2e test builds `stellar-rpc-v2` (43 s from a cold cache in this worktree) and ingests 20,000 zero-tx ledgers two times. The existing tests ingest 200 hot ledgers in 0.21 s and 10,000 cold ledgers in 0.28 s. Measure the whole test; keep it under 2 minutes.
 - `--binary-commit` is extra CLI surface. The option is to run `<bin> version` and parse it, which spec 11 rule 6 forbids. Keep the flag.
 - The pack prefix layout (`packs-v2/cold/ledgers/...`) comes from the old runner and #15. Check it with `aws s3 ls` before the first campaign.
-- The fetch needs S3 read on `s3://stellar-rpc-bench/inputs/...` for the instance role `stellar-rpc-ci-load-test` (facts digest A7, not verified).
-- New fields `datasetBytes`, `startedAt`, `finishedAt` per step: update spec 7.3 in this PR.
+- The fetch needs S3 read on `s3://stellar-rpc-bench/inputs/...` for the instance role `stellar-rpc-ci-load-test` (spec Q2: not verified; PR 08 checks it).
+- `steps[].datasetBytes`, `startedAt` and `finishedAt` are in spec 7.3 and in the PR 06 types. This PR only writes them.
 - The e2e runs the freeze step at its skipped state until PR 12 lands. PR 12 must keep `TestCampaignEndToEndFreeze` green.

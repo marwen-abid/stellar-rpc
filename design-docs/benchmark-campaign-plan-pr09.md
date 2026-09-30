@@ -5,7 +5,7 @@
 | Branch | `bench-campaign-v2/09-workflow` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later). One extra small PR against stellar/stellar-rpc `main` for the stub (4.6). |
 | Depends on | PR 06 (`plan`, `validate`, `estimate`), PR 07 (`run`, `steps[].datasetBytes`), PR 08 (box scripts), Q2 for the first EC2 run |
-| Implements | D10, D16 (5), D17; spec Sections 5, 6.6, 9 |
+| Implements | D10, D16 (4) (upload before launch) and (5), D17, D31; spec Sections 4 item 2, 5, 6.6, 9 |
 | Estimate | about 400 non-test lines added: `bench-campaign.yml` 120, `plan-campaign.sh` 55, `launch-box.sh` 50, `bench-reaper.yml` 50, `reap-boxes.sh` 40, `slack-reaper.jq` 29 + reaper mode in `slack-payload.sh` 12, `bench-scripts.yml` 45. Removed: about 140 (relay). |
 
 `PE` = `cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval`; `BC` = `PE/bench-campaign`.
@@ -14,8 +14,8 @@
 
 After this PR, a person dispatches `Bench campaign` with nine inputs. The
 workflow runs `bench-campaign plan`, `validate` and `estimate` on the GitHub
-runner, starts one tagged box with the PR 08 user-data, prints the instance
-id and ends. The reaper terminates boxes past their `deadline` tag. A CI job
+runner, uploads `campaign.json` to S3, starts one tagged box with the PR 08
+user-data, prints the instance id and ends. The reaper terminates boxes past their `deadline` tag. A CI job
 runs the script tests. The S3 relay code is gone.
 
 ## 2. Scope
@@ -49,7 +49,7 @@ runs the script tests. The S3 relay code is gone.
 |---|---|---|---|
 | `ref` | string | `feature/full-history` | `--ref` |
 | `close_interval` | choice `2s`, `1s`, `600ms` | required | `--close-interval` |
-| `steps` | choice `ingest-cold`, `ingest-hot`, `ingest`, `cold`, `all` | `all` | `--steps` |
+| `steps` | choice `ingest-cold`, `ingest-hot`, `ingest`, `cold`, `hot`, `all` | `all` | `--steps` |
 | `runs` | string | `1` | `--runs` (1 to 5) |
 | `machine` | choice `2x`, `8x` | `2x` | `--machine` |
 | `workers` | string | empty | `--workers` (empty = 8 or 32) |
@@ -75,11 +75,13 @@ not read here. Steps:
    imports (agreed with the PR 06 author), so no native libs are needed.
 3. `BC/plan-campaign.sh` (id `plan`).
 4. `aws-actions/configure-aws-credentials@v4`, `role-duration-seconds: 900`.
-5. `BC/render-user-data.sh` with `CAMPAIGN_ID`, `CAMPAIGN_JSON`,
-   `RUNNER_REPO=${{ github.repository }}`, `RUNNER_COMMIT=${{ github.sha }}`,
-   `CEILING_MINUTES`, `RUN_URL`.
-6. `BC/launch-box.sh` (id `launch`).
-7. Summary: id, instance id, ceiling, deadline (UTC), S3 prefix
+5. `aws s3 cp "$CAMPAIGN_JSON" s3://stellar-rpc-bench/results/<id>/campaign.json`
+   (D16 item 4, D31). A failure ends the job before the launch.
+6. `BC/render-user-data.sh` with `CAMPAIGN_ID`, `RUNNER_REPO=${{
+   github.repository }}`, `RUNNER_COMMIT=${{ github.sha }}`, `CEILING_MINUTES`.
+   The stub gets `campaign.json` from S3 by id (PR 08).
+7. `BC/launch-box.sh` (id `launch`).
+8. Summary: id, instance id, ceiling, deadline (UTC), S3 prefix
    `s3://stellar-rpc-bench/results/<id>/`, `aws ssm start-session --target
    <instance id>`, box log key `logs/box.log`.
 
@@ -167,8 +169,7 @@ notify and cleanup jobs.
 Stays: `.github/workflows/ec2-leg.yml`, `load-test-coordinator.yml`,
 `PE/gather`, `harness/gather.go`, `harness/poller.go`, `bootstrap-common.sh`
 with `upload_result` and `RESULT_KEY` (gather reads the result object through
-`PollerConfig.ResultKey`). Spec Section 9 lists `upload_result` and
-`RESULT_KEY` as removed. That row is wrong; correct it in this PR.
+`PollerConfig.ResultKey`). Spec Section 9 keeps them for the same reason.
 
 ### 4.8 `bench-scripts.yml` (CI job)
 
@@ -221,7 +222,7 @@ proves the relay removal leaves `gather` and `harness` green.
   launch a `t3.nano` with the three tags and `deadline=1`; run
   `gh workflow run bench-reaper.yml`; the box is `terminated`.
 - CI runs the script tests: `bench-scripts.yml` is green on the PR.
-- The first run records the size of each hot dataset:
+- The first campaign records the size of each hot dataset:
   `jq '.steps[] | select(.kind=="ingest-hot") | {name, datasetBytes}'` on the
   uploaded `campaign.json` (field from PR 07). Copy the values into the spec
   (Section 1.1 or Q7 notes).
@@ -243,10 +244,11 @@ proves the relay removal leaves `gather` and `harness` green.
   merges. Dispatch always on `feature/full-history`.
 - The reaper has no schedule until `feature/full-history` merges into
   `main`. The box ceiling is the only automatic net until then (D16 (5)).
+- The GHA role must allow `s3:PutObject` on `stellar-rpc-bench/results/*`
+  for the upload before the launch (not verified).
 - The GHA role must allow `ec2:RunInstances` with the new `campaign-id` tag.
   The terminate grant is conditioned on the `test` tag (facts), so it holds.
   Verify tag-on-create permission for the extra tag.
 - A campaign longer than the 6-hour job limit is fine: no job waits.
-- Decision log in this PR: correct Section 9 (`upload_result`, `RESULT_KEY`
-  stay for `ec2-leg.yml`); record the `campaign-id` tag and the move of the
+- Decision log in this PR: record the `campaign-id` tag and the move of the
   reaper body into `reap-boxes.sh`.

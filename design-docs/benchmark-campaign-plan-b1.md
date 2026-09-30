@@ -4,7 +4,7 @@
 |---|---|
 | Branch | `bench-campaign-v2/b1-converter-bundle` |
 | Repository | stellar-experimental/stellar-rpc-benchmarks (base `main` at `3bc7c49`) |
-| Depends on | PR 03 (`results.json` schema), PR 07 (`campaign.json` `steps[]`), D34 (measurement names `<group>.<row>`), D29 (`schemaVersion`) |
+| Depends on | PR 03 (`results.json` schema), PR 06 (`campaign.json` schema, spec 7.3; a real bundle needs PR 07), D34 (measurement names `<group>.<row>`), D29 (`schemaVersion`) |
 | Implements | D9, D12, D20; spec Sections 7.2, 7.3, 8 item 2, 10.2 B1 |
 | Estimate | about 300 non-test lines: `converter/bundle.py` 210 (new), `converter/convert.py` 90 (layout switch, argument change, builder split). `tests/smoke/gen-fixtures.py` (+30) is under `tests/`, so D32 does not count it. |
 
@@ -66,9 +66,10 @@ def convert_bundle(args) -> dict
 `result_rows` maps each `summary` measurement to the dict that `read_csv`
 returns today: `{"n": count, "n_items": items, "total_ns", "p50_ns",
 "p90_ns", "p99_ns", "max_ns"}`. The name splits at the first dot (D34):
-`driver.ingest_total` → group `driver`, row `ingest_total`. Unit conversion
-to ns: `ns` ×1, `us` ×1e3, `ms` ×1e6, `s` ×1e9, rounded to int. Any other
-unit fails with the measurement name. The `value` measurement
+`driver.ingest_total` → group `driver`, row `ingest_total`. All values are
+integers, and `unit` is `ns`, `bytes` or `count` (spec 7.2 rule 1, D12). A
+`summary` must have `unit: ns`. Any other unit, or a value that is not an
+integer, fails with the measurement name. The `value` measurement
 `driver.peak_rss` with `unit: bytes` returns as the second value. Any other
 `value` measurement is kept out with a warning.
 
@@ -91,11 +92,11 @@ Groups map to the current run JSON keys: `driver` → `driver`, `hot` →
 | `campaign.phase` | `match_phase(close_interval_ns)` | same, plus `query_phase` |
 | `build.commit`, `build.version` | `commit`; `results.json` `binary.commit`, `binary.version` | `invocation.json` `binary.commitHash` |
 | `machine`, `hardware` | `machine.instanceType`, `cpus`, `memoryGiB` | `machine-metadata.txt`, `metadata.json` |
-| `campaign.config` | `inputs`, `packsPrefix`, `runnerCommit`, `blasterCommit` | `metadata.json` `campaign` |
+| `campaign.config` | `inputs`, `load.packs_prefix`, `runnerCommit`, `blasterCommit` | `metadata.json` `campaign` |
 
 The unit id keeps the `<dataset>-c<chunk>` form, because `query_profile`
-(`_PROFILE_TAIL`), `summary.js` dataset sizes and `app.js` labels depend on
-it (facts A6). `--dataset-kind` becomes optional in `main()`: required for
+(`_PROFILE_TAIL` in `convert.py`), `summary.js` dataset sizes and `app.js`
+labels depend on it. `--dataset-kind` becomes optional in `main()`: required for
 the legacy layouts (checked in `convert()`), and a failure when it differs
 from `campaign.json`. The phase needs no `query_phase`: the close interval
 always matches a phase block time (2s, 1s, 600ms; D10).
@@ -125,7 +126,7 @@ them. `vocab` is `new` for the bundle layout (`backfill_wall`, `run_wall`).
 Counts: `unit_counts` reads `n_items` of `ledgers_total`, `txhash_total` and
 `events_total` from the cold driver rows. The bundle path reads `items` of
 the same measurements. The hot `ledgers_per_s` must use `driver.run_wall`
-`items`, not the cold ledger count: `run_wall` covers the paced ledgers only
+`items` (spec 7.2 rule 4), not the cold ledger count: `run_wall` covers the paced ledgers only
 (D21), and a hot dataset of 20,000 ledgers with 10,000 paced ledgers would
 double the rate. The CSV path keeps its formula (its hot runs pace every
 ledger).
@@ -134,9 +135,10 @@ ledger).
 
 In "Inputs — result-bundle layouts & manifests", add the `bundle` layout:
 `campaign.json` at the root, `steps/<name>/results.json`, the field table of
-4.3, D34 names, units, `peak_rss` → `peak_rss_bytes`, step selection. In
-"Top level", state that `campaign.config` for this layout holds `inputs`,
-`packsPrefix`, `runnerCommit` and `blasterCommit`. Keep the run JSON
+4.3, D34 names, the integer units `ns`, `bytes` and `count`, `peak_rss` →
+`peak_rss_bytes`, step selection. In "Top level", state that
+`campaign.config` for this layout holds `inputs`, `load.packs_prefix`,
+`runnerCommit` and `blasterCommit`. Keep the run JSON
 `schema_version` at 1: the output shape does not change.
 
 ## 5. Files
@@ -169,14 +171,14 @@ so the old and new paths can be compared. Reuse `run_convert` from
 | `test_dataset_kind_mismatch_fails` | Caller value must agree | `dataset_kind="pubnet"`, `SystemExit`. |
 | `test_phase_from_close_interval` | 2s → 1, 1s → 2, 600ms → 3 | Three bundles. |
 | `test_peak_rss_value` | `driver.peak_rss` bytes → `peak_rss_bytes` V | Value 412000000. |
-| `test_units_to_ns` | `ms`, `s`, `us` convert; `furlong` fails | Measurement units. |
+| `test_units_checked` | `ns`, `bytes`, `count` pass; `ms` and a float value fail with the name | Measurement units and values. |
 | `test_hot_rate_uses_run_wall_items` | `ledgers_per_s` over paced ledgers | `paced_ledgers=100`, cold 20,000 ledgers. |
 | `test_non_ok_steps_skipped` | `failed`, `crashed`, `skipped` give a warning and no data | `statuses={...}`. |
 | `test_load_and_freeze_steps_skipped` | Warning, no section | Steps of kind `load`, `freeze`. |
 | `test_schema_version_unsupported` | Named failure | `schemaVersion: 2` in each file. |
 | `test_command_mismatch_fails` | `results.json` `command` equals step `kind` | Swap one. |
 | `test_commit_mismatch_warns` | `binary.commit` versus `commit` | Change one commit. |
-| existing `test_campaign.py`, `test_phase.py`, `test_convert.py`, `test_queries_rps.py` | Legacy layouts unchanged | Run unchanged. |
+| existing `test_campaign.py`, `test_phase.py`, `test_convert.py`, `test_golden.py`, `test_queries_rps.py` | Legacy layouts unchanged | Run unchanged. |
 
 ## 7. Done when
 
@@ -196,7 +198,7 @@ so the old and new paths can be compared. Reuse `run_convert` from
 - `make smoke` (Node 22, as `tests.yml`)
 - `python3 converter/convert.py <bundle from a real PR 07 local run> --out-dir /tmp/out`
   and open the result with `make serve`.
-- `git diff --stat main -- . ':!converter/tests/*' ':!tests/*' ':!*.md'` (D32).
+- `git diff --numstat main -- . ':!converter/tests/*' ':!tests/*' ':!*.md'`; sum the first column (D32).
 
 ## 9. Risks and open points
 
