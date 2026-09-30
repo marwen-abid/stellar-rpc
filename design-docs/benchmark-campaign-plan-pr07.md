@@ -64,7 +64,7 @@ bench-campaign run [--root /mnt/nvme/bench] [--repo <git url or path>] [--binary
 
 ### 4.3 Startup order
 
-1. `campaign.Read` and `campaign.Validate` (PR 06).
+1. `campaign.Read` and `plan.Validate` (PR 06).
 2. `AcquireLock(root)`.
 3. Open `logs/runner.log`. Tee it with stdout. Use the old `Notef` line format `== [HH:MM:SS] msg`.
 4. `runnerCommit`: `debug.ReadBuildInfo()` setting `vcs.revision`. If it is absent (`go run`), use `git -C <runner checkout> rev-parse HEAD`.
