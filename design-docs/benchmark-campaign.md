@@ -5,13 +5,17 @@
 | Status | Draft |
 | Base | `feature/full-history` at `36ac502` |
 | Replaces | [marwen-abid/stellar-rpc#12](https://github.com/marwen-abid/stellar-rpc/pull/12) to [marwen-abid/stellar-rpc#20](https://github.com/marwen-abid/stellar-rpc/pull/20) |
+| Decisions | [benchmark-campaign-decisions.md](./benchmark-campaign-decisions.md) |
+| Overview | [RPCv2 Benchmark Campaigns](https://claude.ai/artifact/RWRgf15Ka54ySAzBAHB6k1) (one-page summary) |
 | Related | [stellar-rpc-benchmarks](https://github.com/stellar-experimental/stellar-rpc-benchmarks), [stellar-rpc-blaster](https://github.com/stellar/stellar-rpc-blaster) (branch `dev`) |
 
 ## 1. Purpose
 
 A benchmark campaign answers three questions about RPCv2:
 
-1. **Ingestion.** Does ingestion keep up with the ledger close interval?
+1. **Ingestion.** Does hot ingestion finish each ledger within the ledger
+   close interval? How long does cold ingestion take per chunk? Only hot
+   ingestion has a target. Cold ingestion time is reported with no target.
 2. **Queries.** Does each read endpoint meet its p99 latency target under
    the expected traffic, for recent data (hot tier) and older data (cold
    tier)?
