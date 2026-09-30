@@ -147,9 +147,8 @@ func (a *ReadView) resolveLedgers(c chunk.ID) (LedgerReader, func() error, error
 // Events resolves chunk c's event store as the common event.Reader the
 // query engine consumes, uniform across tiers. A cold reader is view-owned —
 // Release closes it; the hot facade is registry-owned. Returns ErrUnavailable
-// when c has no serving home. The hot facade is safe here because the registry
-// holds read-write handles, whose events store is warmed (a read-only open
-// would have none).
+// when c has no serving home. A published hot handle must have events: a
+// read-write open or hotchunk.OpenReadOnlyWithEvents.
 func (a *ReadView) Events(c chunk.ID) (event.Reader, error) {
 	t, db, err := a.resolveTier(c, geometry.KindEvents)
 	if err != nil {

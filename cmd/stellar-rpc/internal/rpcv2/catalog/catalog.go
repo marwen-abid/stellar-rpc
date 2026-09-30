@@ -3,6 +3,7 @@ package catalog
 import (
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 
@@ -41,7 +42,28 @@ type Catalog struct {
 func Open(
 	path string, layout geometry.Layout, txhashIndex geometry.TxHashIndexLayout, logger *supportlog.Entry,
 ) (*Catalog, error) {
-	store, err := rocksdb.New(rocksdb.Config{Path: path, Logger: logger})
+	return open(path, layout, txhashIndex, logger, false)
+}
+
+// OpenReadOnly opens an existing catalog read-only. It fails when path holds no catalog and writes no file.
+// It runs the census as Open does and refuses a catalog without the cold-index
+// secret. Writes (put, del, Batch) return the RocksDB read-only error. A
+// read-only open takes no LOCK; the caller must not open a catalog read-only
+// while a writer has it open.
+func OpenReadOnly(
+	path string, layout geometry.Layout, txhashIndex geometry.TxHashIndexLayout, logger *supportlog.Entry,
+) (*Catalog, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("catalog: open read-only %s: %w", path, err)
+	}
+	return open(path, layout, txhashIndex, logger, true)
+}
+
+func open(
+	path string, layout geometry.Layout, txhashIndex geometry.TxHashIndexLayout, logger *supportlog.Entry,
+	readOnly bool,
+) (*Catalog, error) {
+	store, err := rocksdb.New(rocksdb.Config{Path: path, Logger: logger, ReadOnly: readOnly})
 	if err != nil {
 		return nil, err
 	}
@@ -55,13 +77,10 @@ func Open(
 		_ = c.Close()
 		return nil, err
 	}
-	// Mint-or-load the cold-index secret up front (get-or-create is not atomic;
-	// here it runs single-threaded) and cache it, so post-Open Secret() reads are
-	// lock-free and cannot fail.
-	secret, err := c.ensureSecret()
+	secret, err := c.readSecret(readOnly, path)
 	if err != nil {
 		_ = c.Close()
-		return nil, fmt.Errorf("catalog: ensure cold-index secret: %w", err)
+		return nil, err
 	}
 	c.secret = secret
 	return c, nil
