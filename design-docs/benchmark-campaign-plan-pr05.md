@@ -4,7 +4,7 @@
 |---|---|
 | Branch | `bench-campaign-v2/05-bench-serve` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
-| Depends on | PR 01 (read-only hot open with events, `catalog.OpenReadOnly`), PR 02 (kept catalog, pinned earliest ledger, frontier chunk). PR 04 is optional: when it is merged first, pass its read sink. D30 is Proposed: confirm it before the method filter is built. |
+| Depends on | PR 01 (read-only hot open with events, `catalog.OpenReadOnly`), PR 02 (kept catalog, pinned earliest ledger, frontier chunk). PR 04 is optional: when it is merged first, pass its read sink. D30 is confirmed. |
 | Implements | D3, D5 (file-set test over the dataset root), D20, D24, D26, D30; spec Sections 6.3 and 6.9; spec Section 10.1 row 05 |
 | Estimate | About 390 non-test lines: `P/serve_dataset.go` 210, `P/jsonrpc.go` 15, `P/bench/serve.go` 110, `P/bench/profile.go` 45, `P/bench/command.go` 5, `cmd/stellar-rpc/rpcv2/main.go` 1 |
 
@@ -42,7 +42,7 @@ It serves `/metrics` and `/debug/pprof` on the admin port, with the request metr
 - `startAdminServer(ctx, endpoint, logger, processRegistry) (net.Addr, func(), error)` (`P/serve.go`) serves `jsonrpc.NewAdminMux`.
 - `newJSONRPCHandler(cfg, p)` (`P/jsonrpc.go`) calls `jsonrpc.BuildHandlerSpecs`, appends `queryEvents`, calls `limitsByMethod(m).Apply(specs)`, then wraps each spec with `wrapAdapterRequest` and `getHealth` with `gateHealthOnFirstCommit`. `BuildHandlerSpecs` calls `deps.Daemon.FastCoreClient()` at build time.
 - At 91f158b the 13 methods are `getHealth`, `getEvents`, `getNetwork`, `getVersionInfo`, `getLatestLedger`, `getLedgers`, `getLedgerEntries`, `getTransaction`, `getTransactions`, `sendTransaction`, `simulateTransaction`, `getFeeStats` and `queryEvents` (`protocol.QueryEventsMethodName` = `"queryEvents"`; the facts digest calls it `getEventsV2`, from 36ac502).
-- `runDaemonWith` (`P/daemon.go`) builds one `prometheus.NewRegistry()`, calls `host.RegisterProcessMetrics(registry, logger)`, `buildSinks`, then `corestate.New(ctx, corestate.Config{CoreURL, QueryPort, RequestTimeout, StellarCoreBinaryPath, Registry, Namespace, Logger})`. `corestate.New` needs no running core. With an empty `StellarCoreBinaryPath` it reports no core version. `corestate.Daemon.MetricsRegistry()` returns the registry it got. `host.MakeNoOpDaemon().MetricsRegistry()` returns a new registry on each call (`internal/host/noOpDaemon.go`).
+- `runDaemonWith` (`P/daemon.go`) builds one `prometheus.NewRegistry()`, calls `host.RegisterProcessMetrics(registry, logger)`, then `buildSinks`. `host.Daemon` has `MetricsRegistry`, `MetricsNamespace`, `CoreClient`, `FastCoreClient` and `CoreVersion`. `host.MakeNoOpDaemon()` returns a `*host.NoOpDaemon`: its `FastCoreClient()` is a no-op client, and its `MetricsRegistry()` returns a new registry on each call (`internal/host/noOpDaemon.go`).
 - `lastCommittedLedger(cat)` (`P/progress.go`) is unexported in `rpcv2`. It refines with `hotchunk.OpenReadyView` (read-only). `ServeDataset` is in `rpcv2`, so it calls it directly.
 - `query.NewRegistry(cat, retention)` starts with latest 0 and `bootSeq` 0. So after `SetLatestLedger(latest > 0)`, `HasCommittedSinceBoot` is true and `gateHealthOnFirstCommit` passes.
 - `adapters.SeedCloseTimes(registry)` is a no-op at latest 0 and fails when the retention floor is below the dataset (facts A2).
@@ -63,14 +63,14 @@ func ServeDataset(ctx context.Context, opts ServeDatasetOptions) error
 Sequence (spec 6.3). Each failure returns an error; the command exits non-zero.
 
 1. Validate the options one time (code rule 3). An empty `NetworkPassphrase` fails before any open (D20). `Dataset`, `Listen` and `AdminListen` must be set.
-2. `layout := geometry.NewLayout(opts.Dataset)`. Open the catalog with `catalog.OpenReadOnly(layout.CatalogPath(), layout, txLayout, logger)` (PR 01; confirm its signature). `defer cat.Close()`.
+2. `layout := geometry.NewLayout(opts.Dataset)`. Open the catalog with `catalog.OpenReadOnly(layout.CatalogPath(), layout, txLayout, logger)` (PR 01). It fails on a missing catalog and on a catalog without `meta/catalog-secret` (D36). `defer cat.Close()`.
 3. `earliest, ok, err := cat.EarliestLedger()`. `!ok` fails with "dataset has no config:earliest_ledger". `retention := geometry.NewRetention(0, chunk.IDFromLedger(earliest))`.
 4. `reg := query.NewRegistry(cat, retention)`. `defer reg.Close()` (it closes every published handle). Do not call `query.OpenRegistry`.
-5. For each `c` in `cat.ReadyHotChunkKeys()`: open `layout.HotChunkPath(c)` with the PR 01 read-only open with events, then `reg.PublishHandle(c, db)`. This includes the frontier chunk of a cold dataset.
-6. `latest, err := lastCommittedLedger(cat)`. `reg.SetLatestLedger(latest, query.UnknownCloseTime())`. Then `adapters.SeedCloseTimes(reg)`.
-7. `cfg, _ := config.ParseConfig(nil)`. Set `cfg.Service.Endpoint = opts.Listen`, `cfg.Service.AdminEndpoint = opts.AdminListen`, and `MaxHealthyLedgerLatency` to `1000000h` (the validator accepts any value of 1 ms or more). Synthetic packs have old close times, so the default 30 s gives an unhealthy `getHealth`.
+5. For each `c` in `cat.ReadyHotChunkKeys()`: open `layout.HotChunkPath(c)` with `hotchunk.OpenReadOnlyWithEvents` (PR 01), then `reg.PublishHandle(c, db)`. This includes the frontier chunk of a cold dataset.
+6. `latest, err := lastCommittedLedger(cat)`, as the daemon does (D3). On a cold dataset the empty frontier chunk refines nothing, so `latest` is the last cold ledger. `reg.SetLatestLedger(latest, query.UnknownCloseTime())`. Then `adapters.SeedCloseTimes(reg)`: it reads the header of `latest` and calls `SetLatestLedger(latest, query.CloseTimeAt(<header close time>))`. So the registry holds the latest ledger with the close time of its header (spec 6.3 item 6).
+7. `cfg, _ := config.ParseConfig(nil)`. Set `cfg.Service.Endpoint = opts.Listen`, `cfg.Service.AdminEndpoint = opts.AdminListen`, and `cfg.Service.Methods.GetHealth.MaxHealthyLedgerLatency` to `1000000h` (D3). The value 0 does not turn the check off: `validateService` rejects a limit below 1 ms. Test ledgers have close times near 1970, so the default 30 s gives an unhealthy `getHealth`.
 8. `registry := prometheus.NewRegistry()`; `host.RegisterProcessMetrics(registry, logger)`; `metrics := observability.NewPrometheusMetrics(registry, host.PrometheusNamespace)`. With PR 04: `observability.NewReadMetrics(registry, host.PrometheusNamespace)`.
-9. `coreDaemon, err := corestate.New(ctx, corestate.Config{...})` with `cfg.Ingestion.CoreURL`, `deref(cfg.Ingestion.CoreHTTPQueryPort)`, `deref(cfg.Ingestion.CoreRequestTimeout)`, `Registry: registry`, empty binary path. This is the Daemon whose `MetricsRegistry()` is the admin registry. No preflight pool: `simulateTransaction` is not served, and its handler does not use the getter at build time.
+9. `coreDaemon := serveDaemon{NoOpDaemon: host.MakeNoOpDaemon(), registry: registry}`. `serveDaemon` is a small unexported type in `serve_dataset.go` (D3, spec 6.3 item 10). It embeds `*host.NoOpDaemon` and overrides `MetricsRegistry()` to return `registry`, the admin registry. `FastCoreClient()` comes from the embedded no-op daemon, so `BuildHandlerSpecs` gets a client at build time. No preflight pool: `simulateTransaction` is not served, and its handler does not use the getter at build time.
 10. `adminAddr, stopAdmin, err := startAdminServer(ctx, cfg.Service.AdminEndpoint, logger, registry)`. `defer stopAdmin()`.
 11. Listen on `cfg.Service.Endpoint` with `net.ListenConfig`. `defer listener.Close()`.
 12. `serve := newServeReads(cfg, handlerParams{daemon: coreDaemon, logger, metrics, feeWindows: feewindow.NewFeeWindows(classic, soroban from cfg.Service.FeeStats), networkPassphrase: opts.NetworkPassphrase, retentionWindow: retention.RetentionWindow(), serveOnly: benchServeMethods})`.
@@ -110,7 +110,7 @@ The estimate is about 390 lines, under the 600-line limit. A split is not necess
 
 | File | Change | What | Lines |
 |---|---|---|---|
-| `P/serve_dataset.go` | new | `ServeDatasetOptions`, `ServeDataset`, `benchServeMethods`, open and publish loop | 210 |
+| `P/serve_dataset.go` | new | `ServeDatasetOptions`, `ServeDataset`, `serveDaemon`, `benchServeMethods`, open and publish loop | 210 |
 | `P/jsonrpc.go` | modify | `handlerParams.serveOnly`, filter after `Apply` | 15 |
 | `P/bench/serve.go` | new | `NewServeCommand`, flags, `ready` line | 110 |
 | `P/bench/profile.go` | modify | `rateFlags` | 45 |
@@ -129,8 +129,8 @@ Put the tests in package `bench` (`P/bench/serve_test.go`), so they can use the 
 |---|---|---|---|
 | `TestBenchServe_ServesMethods/cold`, `/hot` | `P/bench/serve_test.go` | Each of the seven methods answers without error. `getTransactions` returns hashes. `getTransaction` for one of them returns `SUCCESS`. `getEvents` returns at least one event. `getHealth` reports `healthy` with the dataset's oldest and latest ledgers. | `buildServeDataset`, `rpcv2test.PostRPC`. |
 | `TestBenchServe_OtherMethodsNotFound` | same | `getFeeStats`, `getVersionInfo`, `getLedgerEntries`, `sendTransaction`, `simulateTransaction`, `queryEvents` return error code -32601. | hot dataset; `RPCResponse.Error`. |
-| `TestBenchServe_DatasetUnchanged/cold`, `/hot` | same | The dataset root file set (relative path, size, modification time) is the same before the start and after serve, reads (events included) and cancel. | `filepath.WalkDir` snapshot. Reuse the PR 01 file-set helper if PR 01 puts it in `rpcv2test`; else add `rpcv2test.FileSet(t, root)`. |
-| `TestBenchServe_MetricsOnAdmin` | same | `/metrics` holds `soroban_rpc_json_rpc_request_duration_seconds` for `getLatestLedger` after one call, and `go_goroutines`. | HTTP GET, as `scrapeMetrics` in `P/metrics_test.go` does. |
+| `TestBenchServe_DatasetUnchanged/cold`, `/hot` | same | The dataset root file set (relative path, size, modification time) is the same before the start and after serve, reads (events included) and cancel. | `fileset.Take` before the start, `fileset.RequireUnchanged` after the cancel (`P/rpcv2test/fileset`, PR 01). |
+| `TestBenchServe_MetricsOnAdmin` | same | `/metrics` holds `soroban_rpc_json_rpc_request_duration_seconds` for `getLatestLedger` after one call, and `go_goroutines`. This proves that `serveDaemon.MetricsRegistry()` is the admin registry. | HTTP GET, as `scrapeMetrics` in `P/metrics_test.go` does. |
 | `TestBenchServe_EmptyPassphraseFails` | same | `bench-serve --dataset <root>` with no `--network-passphrase` returns an error before it opens anything; the dataset root is unchanged. | `NewServeCommand()`, `cmd.SetArgs`, `cmd.Execute()`. |
 | `TestBenchServe_ReadyLine` | same | The command writes `ready` to stdout once, and exits 0 on cancel. | `cmd.SetOut(&buf)`, `cmd.ExecuteContext(ctx)`. |
 | `TestProfileRates_Parse` | `P/bench/profile_test.go` | `0,0`, `1000,5` pass; `-1,0`, `abc`, `1` fail. | table test. |
@@ -159,12 +159,12 @@ Manual check on a local dataset from `bench-ingest cold`: start `bench-serve`, r
 
 ## 9. Risks and open points
 
-- Check first: the names and signatures that PR 01 merges (`catalog.OpenReadOnly`, the read-only open with events). This plan does not name the hot open; use the PR 01 name.
+- Check first: the signatures that PR 01 merges (`catalog.OpenReadOnly`, `hotchunk.OpenReadOnlyWithEvents`).
 - Check first: PR 02 changes `runCold` and `runHot` options. `buildServeDataset` must use the merged names.
 - `lastCommittedLedger` opens the highest ready hot chunk a second time, read-only, while `ServeDataset` holds its own read-only handle. Two read-only opens take no LOCK and write nothing (facts S1). The file-set test covers it.
 - Each opened hot chunk has a 512 MB block cache (facts). A hot dataset of 2 chunks plus nothing else is about 1 GB. A cold dataset opens one empty frontier chunk.
 - The events warmup of each hot chunk runs at open (facts A1). On a full chunk it can take long. PR 10 waits on `getHealth`, not on the `ready` line, so this is safe; note the time in the PR description.
 - `observability.NewPrometheusMetrics` registers gauges that nothing sets in `bench-serve` (for example `last_committed_ledger`). They read 0. That is acceptable; say so in the command help.
 - `getHealth` (`internal/methods/get_health.go`) does not check the retention window. It reports `ledgerRetentionWindow` = `RetentionWindow()` = 0 (full history), as the daemon does with `retention_chunks = 0`. Test LCMs can have close time 0 (1970). `1000000h` (about 114 years) covers it.
-- D30 is Proposed. Confirm it with Marwen before merge, and change its status in the decision log in this PR.
+- `serveDaemon` must override `MetricsRegistry()`. Without the override, the embedded `NoOpDaemon` returns a new registry on each call, and the request metric goes to a registry that `/metrics` does not serve. `TestBenchServe_MetricsOnAdmin` catches it.
 - A read-only open beside a writer is undefined in RocksDB. Nothing enforces it. The command help says: never run `bench-serve` on a dataset that another process writes.

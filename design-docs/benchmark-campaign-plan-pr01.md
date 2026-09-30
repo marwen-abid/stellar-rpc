@@ -5,7 +5,7 @@
 | Branch | `bench-campaign-v2/01-readonly-open` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
 | Depends on | None. D5 is confirmed. |
-| Implements | D5; spec Section 6.2 (not the whole-root test, which is PR 05) |
+| Implements | D5, D36; spec Section 6.2 (not the whole-root test, which is PR 05) |
 | Estimate | About 120 non-test lines: `stores/hotchunk/hotchunk.go` 40, `catalog/catalog.go` 30, `catalog/secret.go` 10, `query/resolve.go` and `query/registry.go` comments 6, `rpcv2test/fileset/fileset.go` 35 |
 
 `P` is `cmd/stellar-rpc/internal/rpcv2`. All identifiers below were read at `91f158b`.
@@ -82,7 +82,7 @@ Change:
 
 3. `OpenReadOnly` first calls `os.Stat(path)`. On any error it returns `fmt.Errorf("catalog: open read-only %s: %w", path, err)`. This check runs before RocksDB, so a missing path never reaches the RocksDB env layer. Then it opens with `rocksdb.Config{Path: path, Logger: logger, ReadOnly: true}`.
 4. The census runs as in `Open`. It is a scan and writes nothing.
-5. Add `loadSecret() ([32]byte, bool, error)` in `secret.go`. `ensureSecret` calls it and mints only when it reports false. `OpenReadOnly` calls `loadSecret` and fails with `catalog: no cold-index secret at %s` when it is absent. Reason: every catalog that `catalog.Open` wrote has the secret, so an absent secret means the directory is not a finished catalog. Readers do not need the secret (facts F3), so the alternative "leave it zero" also works. Decide in PR if a reviewer prefers it; record the choice in the decision log.
+5. Add `loadSecret() ([32]byte, bool, error)` in `secret.go`. `ensureSecret` calls it and mints only when it reports false. `OpenReadOnly` calls `loadSecret` and fails with `catalog: no cold-index secret at %s` when it is absent. D36 sets this rule. Reason: every catalog that `catalog.Open` wrote has the secret, so an absent secret means the directory is not a finished catalog.
 6. Writes on a read-only catalog (`put`, `del`, `Batch`) return the RocksDB error. Add no extra guard. Document this on `OpenReadOnly`.
 
 Open point to check first: `(*Catalog).NewSnapshot` calls `rocksdb.Store.NewSnapshot`. RocksDB supports snapshots on a read-only DB. The test in Section 6 proves it (`NewReadView` in PR 05 needs it).
@@ -138,7 +138,7 @@ Directories are in the set, so a file that is created and then removed still cha
 | `TestOpenReadOnly_MissingCatalog` | same | Spec: fails on a missing catalog and writes no file. | Parent `p := t.TempDir()`; `Take(t, p)`; `OpenReadOnly(filepath.Join(p, "catalog", "rocksdb"), ...)` returns an error that wraps `fs.ErrNotExist`; `RequireUnchanged(t, p, before)`. |
 | `TestOpenReadOnly_RejectsWrites` | same | A write returns an error and changes no file. | `FlipHotReady` on the read-only catalog returns an error. |
 | `TestOpenReadOnly_RefusesForeignKey` | same | The census still runs. | Open read-write, write a foreign key with `c.put`, close (as `reopenAfter` in `census_test.go` does); `OpenReadOnly` returns `errors.Is(err, ErrForeignCatalog)`. |
-| `TestOpenReadOnly_NoSecret` | same | A catalog without the secret is refused (Section 4.2 item 5). | Open read-write, `c.del(catalogSecretStoreKey)`, close; `OpenReadOnly` fails with the no-secret error. |
+| `TestOpenReadOnly_NoSecret` | same | A catalog without the secret is refused (D36, Section 4.2 item 5). | Open read-write, `c.del(catalogSecretStoreKey)`, close; `OpenReadOnly` fails with the no-secret error. |
 | `TestTakeDetectsChanges` | `fileset`, `fileset_test.go` | The helper detects a new file, a removed file, a size change and an mtime change. | Plain files in `t.TempDir()`. Use a failing `testing.TB` stub to assert that `RequireUnchanged` fails. |
 
 ## 7. Done when
@@ -167,6 +167,6 @@ git diff --stat feature/full-history -- . ':!*_test.go' ':!*.md'   # at or under
 - Check first: RocksDB snapshots on a read-only DB. `TestOpenReadOnly_FileSetUnchanged` calls `NewSnapshot`. If it fails, stop and report; PR 05 needs it.
 - Check first: a read-only RocksDB open of an existing directory writes no info LOG file. The facts probe (S1) says so for a hot chunk directory. The catalog test proves it for the catalog (default options, no per-CF tuning).
 - The `os.Stat` pre-check in `OpenReadOnly` covers a missing path. An existing empty directory reaches RocksDB, which fails on the missing `CURRENT`. Add a test for the empty directory if the reviewer asks; check that it writes no file.
-- Decision to record in the decision log in this PR: `OpenReadOnly` refuses a catalog without `meta/catalog-secret` (Section 4.2 item 5), or the alternative if the review changes it.
+- D36 fixes the refusal of a catalog without `meta/catalog-secret` (Section 4.2 item 5). A change to it needs an amendment of D36 first.
 - The warmup cost moves to the open. `bench-serve` opens N ready chunks at start; each open scans two CFs. For a 10,000-ledger hot chunk this is not measured yet. PR 05 logs the open time.
 - Nothing stops a caller from opening a chunk read-only while a writer holds it. Keep the doc warning on `OpenReadOnlyWithEvents` and on `OpenReadOnly`.

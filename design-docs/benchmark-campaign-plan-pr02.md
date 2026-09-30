@@ -5,7 +5,7 @@
 | Branch | `bench-campaign-v2/02-ingest-catalog` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
 | Depends on | None in code. D4 (confirmed), D14 (confirmed). PR 03 edits the same files (`cold.go`, `hot.go`, `command.go`): merge PR 02 first or rebase PR 03 on it. |
-| Implements | D4, D14 (enforced by the existence check); spec Section 6.1 item 1; Q6 (answered yes) |
+| Implements | D4, D14 (enforced by the existence check); spec Section 6.1 item 1; Q6 (D4 answers it) |
 | Estimate | About 130 non-test lines (added plus removed): `bench/dataset.go` (replaces `scratch.go`) 60, `bench/cold.go` 35, `bench/hot.go` 15, `bench/command.go` 20 |
 
 `P` is `cmd/stellar-rpc/internal/rpcv2`. All identifiers below were read at `91f158b`.
@@ -150,7 +150,7 @@ Test time: the cold tests use one or two full chunks, as the existing cold tests
 |---|---|
 | A cold run and a hot run each leave a catalog. | `TestRunColdKeepsCatalog`, `TestRunHotKeepsCatalog` pass. |
 | `query.NewReadView` succeeds on both catalogs. | Both tests call `readViewOn`, which asserts `NewReadView` and `adapters.SeedCloseTimes` return no error. |
-| A second run into the same root fails and writes no file. | `TestRunColdRefusesExistingDataset`, `TestRunHotRefusesExistingDataset` pass. |
+| A second run into the same dataset fails and writes no file. | `TestRunColdRefusesExistingDataset`, `TestRunHotRefusesExistingDataset` pass. |
 | Pin is set. | Both keep-catalog tests assert `EarliestLedger`. |
 | No scratch catalog remains. | `grep -rn 'openScratchCatalog\|bench-ingest-catalog-\|catalog-dir' cmd/stellar-rpc/internal/rpcv2/bench` returns nothing. |
 

@@ -4,8 +4,8 @@
 |---|---|
 | Branch | `bench-campaign-v2/12-freeze` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
-| Depends on | PR 02 (kept catalog, pinned earliest ledger), PR 03 (`results.json` writer). PR 01 only for the `fileset` test helper. D23 (confirmed), D33 (proposed: the runner runs the freeze after the hot load step). |
-| Implements | D23; spec Section 6.8; requirement R1 "freezing" (requirements evaluation) |
+| Depends on | PR 02 (kept catalog, pinned earliest ledger), PR 03 (`results.json` writer). PR 01 only for the `fileset` test helper. D23, D33 (the runner runs the freeze after the hot load step) and D37 (the range, the second-freeze error), all confirmed. |
+| Implements | D23, D37; spec Section 6.8, Section 7.2 rule 9 (`freeze` keys); requirement R1 "freezing" (requirements evaluation) |
 | Estimate | About 170 non-test lines: `bench/freeze.go` 100, `bench/cold.go` 35 (shared driver), `bench/command.go` 35 |
 
 `P` is `cmd/stellar-rpc/internal/rpcv2`. All identifiers below were read at `91f158b`.
@@ -57,7 +57,7 @@ func runFreeze(ctx context.Context, logger *supportlog.Entry, opts freezeOptions
 2. `layout := geometry.NewLayout(opts.Dataset)`. `os.Stat(layout.CatalogPath())` must succeed. Reason: `catalog.Open` creates a missing catalog (facts A2), so a wrong `--dataset` would freeze nothing into a new empty catalog.
 3. `cat, err := catalog.Open(layout.CatalogPath(), layout, txLayout, logger)`; `defer cat.Close()`. Read-write: the freeze writes cold files and catalog entries (spec 6.8). The kept catalog holds the catalog secret that PR 02 minted; `WriteColdChunk` reads it through `ingestConfigFor`.
 4. `lo, hi, err := completeHotRange(cat, logger)` (4.3).
-5. Refuse a frozen dataset: when `cat.State(c, geometry.KindLedgers)` is not empty for any `c` in `[lo, hi]`, return `errAlreadyFrozen`. A second freeze would resolve an empty plan and time nothing.
+5. Refuse a frozen dataset: when `cat.State(c, geometry.KindLedgers)` is not empty for any `c` in `[lo, hi]`, return `errAlreadyFrozen`. D37: a second freeze of a dataset returns an error. Without the check it would resolve an empty plan and time nothing.
 6. `config.PrepareRoots(layout.LedgersRoot(), layout.EventsRoot(), layout.EventsIndexRoot(), layout.TxHashRawRoot(), layout.TxHashIndexRoot())`, the same call as `runCold`.
 7. `os.MkdirAll(opts.OutDir)`; results `start` with `command: "freeze"` (PR 03 writer).
 8. The shared driver (4.4) with `Backend: nil` and `lo`, `hi`.
@@ -74,7 +74,7 @@ func completeHotRange(cat *catalog.Catalog, logger *supportlog.Entry) (lo, hi ch
 - The range is the longest run of consecutive complete chunks from `ready[0]`. Stop at the first incomplete chunk or gap. Fail when the first chunk is incomplete.
 - These opens run before the timed region.
 
-Reason: the lifecycle freezes `[floor, lastChunk]`, where `lastChunk` is `LastCompleteChunk` (highest ready minus one), because the highest ready chunk is the live chunk. A bench hot dataset has no live chunk: its top chunk can be complete (`--num-chunks 2`, no `--num-ledgers`). An incomplete chunk in the range would fall through `backfillSource` to "no local copy and no bulk backend" and fail the run.
+Rule (D37): all consecutive complete ready hot chunks from the lowest, including the top chunk when it is complete. Reason: the lifecycle freezes `[floor, lastChunk]`, where `lastChunk` is `LastCompleteChunk` (highest ready minus one), because the highest ready chunk is the live chunk. A bench hot dataset has no live chunk: its top chunk can be complete (`--num-chunks 2`, no `--num-ledgers`). An incomplete chunk in the range would fall through `backfillSource` to "no local copy and no bulk backend" and fail the run.
 
 ### 4.4 Shared driver (`cold.go`)
 
@@ -93,7 +93,7 @@ With `Backend: nil` and `HotHandle: nil`, `backfillSource` takes branch (1) for 
 
 ### 4.5 Parameters in `results.json`
 
-`startChunk` (`lo`), `numChunks` (`hi - lo + 1`), `workers`, `source: "hot"`, `txhashIndexChunks` (same computation as PR 03 for cold), `readyHotChunks` (the count of ready keys, so a reader sees chunks left out by 4.3).
+`startChunk` (`lo`), `numChunks` (`hi - lo + 1`), `workers`, `source: "hot"`, `txhashIndexChunks` (same computation as PR 03 for cold), `readyHotChunks` (the count of ready keys, so a reader sees chunks left out by 4.3), and `flags`, the raw flag map (spec 7.2 rule 9).
 
 ### 4.6 Catalog before and after
 
@@ -163,7 +163,7 @@ Manual check: build with `make build-rpc-v2`. Run `bench-ingest hot --num-chunks
 ## 9. Risks and open points
 
 - The daemon freezes through the registry's shared read-write handle (`ProcessConfig.HotHandle`), whose block cache holds recent data. The bench opens each database read-only with an empty block cache. The OS page cache state depends on what ran before (D33: the hot load step). Record the step order in `campaign.json` (PR 07); the README states the difference.
-- The range rule (4.3) freezes the top chunk when it is complete. The lifecycle never freezes the live chunk. For the campaign's two full chunks this freezes both, which is what the step name says. Record the rule in the decision log in this PR as a new decision (proposed: "freeze covers the complete ready hot chunks from the lowest, including the top chunk").
+- The range rule (4.3, D37) freezes the top chunk when it is complete. The lifecycle never freezes the live chunk. For the campaign's two full chunks this freezes both, which is what the step name says. A change to the rule needs an amendment of D37 first.
 - `errAlreadyFrozen` makes a rerun fail. The runner must use a fresh hot dataset for each freeze step; it does (each run has its own datasets, spec Section 4).
 - `completeHotRange` opens each ready chunk read-only once before the timed region. With the default 512 MB block cache per database (facts), two sequential opens allocate and free the cache; no effect on the timing.
 - The estimate in the requirements evaluation (60 to 100 lines) did not include the shared-driver refactor and the command wiring. 170 lines is still well under 600.

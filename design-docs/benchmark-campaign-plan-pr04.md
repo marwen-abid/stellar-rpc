@@ -5,7 +5,7 @@
 | Branch | `bench-campaign-v2/04-storage-metrics` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
 | Depends on | Nothing. It can go in parallel with PRs 01, 02, 03 and 06. |
-| Implements | D6 (amended), spec Section 6.4, spec Section 10.1 row 04 |
+| Implements | D6 (amended), D35; spec Section 6.4, spec Section 10.1 row 04 |
 | Estimate | About 370 non-test lines: `query/read_timing.go` 170, `query/registry.go` 35, `query/resolve.go` 25, `query/tx_lookup.go` 25, `stores/ledger/cold_reader.go` 12, `stores/event/cold_reader.go` 18, `observability/read_metrics.go` 60, `jsonrpc.go` 12, `daemon.go` 10. Docs are not counted. |
 
 ## 1. Goal
@@ -18,7 +18,7 @@ A read view without a method name records nothing.
 ## 2. Scope
 
 - Add the timers, the per-view accumulator and the sink interface in package `query` (new file `query/read_timing.go`).
-- Return the tier from `resolveLedgers` and from the events resolve step (`query/resolve.go`), and give `windowGatedIndex` a tier (`query/tx_lookup.go`).
+- Return the tier from `resolveLedgers` and from `ReadView.Events` through a new `resolveEvents` (`query/resolve.go`), and give `windowGatedIndex` a tier (`query/tx_lookup.go`).
 - Measure the blocking first-use wait in the lazy cold readers (`stores/ledger/cold_reader.go`, `stores/event/cold_reader.go`).
 - Add the Prometheus sink `observability.ReadMetrics` (new file `observability/read_metrics.go`) and wire it through `wrapAdapterRequest` (`jsonrpc.go`) and `runDaemonWith` (`daemon.go`).
 - Document both metrics in `docs/MONITORING.md` and in the metrics table of `docs/ARCHIVE-NODE-BETA-RUNBOOK.md`.
@@ -56,7 +56,8 @@ type ReadSink interface {
 
 - The store label is the `geometry.Kind` string: `ledgers`, `events`, `txhash` (`geometry/keys.go`).
 - The tier label is `hot` or `cold`. Add `func (t tier) label() string` beside the existing `tierCold`, `tierHot`.
-- New constructor: `func (r *Registry) NewRequestView(method string, sink ReadSink) (*ReadView, error)`. It calls `NewReadView` and sets two new `ReadView` fields, `method` and `sink`. `NewReadView` stays unchanged, so `feereplay.go` and `adapters/seed.go` get a view that records nothing.
+- New constructor (D35): `func (r *Registry) NewRequestView(method string, sink ReadSink) (*ReadView, error)`. It calls `NewReadView` and sets two new `ReadView` fields, `method` and `sink`. `NewReadView()` stays unchanged, so `feereplay.go` and `adapters/seed.go` get a view that records nothing.
+- The sink type that the daemon and `bench-serve` pass is `observability.ReadMetrics` (4.5, D35). `ReadSink` is only the interface that `query` needs to avoid the import cycle.
 - New `ReadView` field `storeTimes [3][2]storeTime` with `storeTime{d time.Duration; used bool}`. Index 0..2 = ledgers, events, txhash. Index 0..1 = hot, cold. A view serves one goroutine, so no lock is necessary (see the `ReadView` doc comment).
 - `ReadView.timed() bool` is true when `method != ""` and `sink != nil`. When it is false, the resolve methods return the raw readers. Views without a method pay no timer cost.
 - `ReadView.Release` runs the closers first (they can add open time), then calls `sink.ObserveStore` one time for each `(store, tier)` with `used == true`, then releases the snapshot. The existing double-release guard (`a.snap == nil`) also guards the observation.
@@ -68,7 +69,7 @@ type ReadSink interface {
 | `resolveLedgers` | Return `(LedgerReader, tier, func() error, error)`. When `timed()`, wrap the reader in `timedLedgerReader{inner, view, tier}`. | See next rows. |
 | `timedLedgerReader.WithLedger(seq, fn)` | Time the call. Subtract the time spent inside `fn`. | The store read, not the handler's decode in `fn`. |
 | `timedLedgerReader.IterateLedgers(start, end)` | Wrap the inner iterator. Start a clock before each step. Stop it when the inner iterator calls the wrapper's yield. Restart it after the consumer's `yield` returns. | Each iterator step only. The body of `ScanLedgers`' consumer is not counted. |
-| `ReadView.Events` | Move the tier switch to `resolveEvents(c) (event.Reader, tier, error)`. When `timed()`, wrap in `timedEventReader`. | Each of `Offsets`, `EventCount`, `LookupKeys`, `FetchEvents`; each step of `FetchRange` and `All`, with the same yield rule. `ChunkID` is not timed. |
+| `ReadView.Events` | Move the tier switch to `resolveEvents(c) (event.Reader, tier, error)`, which `Events` calls. `Events` keeps its signature; its one caller is `event_page.go`. When `timed()`, wrap in `timedEventReader`. | Each of `Offsets`, `EventCount`, `LookupKeys`, `FetchEvents`; each step of `FetchRange` and `All`, with the same yield rule. `ChunkID` is not timed. |
 | `windowGatedIndex.Get` | Add a field `tier`. `HotTxHashIndexes` sets `tierHot`, `ColdTxIndexes` sets `tierCold`. Time `g.inner.Get(hash)` when `timed()`. | The hot index get, or the cold `.idx` open plus get. |
 | `lazyColdTxIndex.Get` | Time `txhash.OpenColdReader(...)` and call `sink.ObserveOpen(geometry.KindTxHash, d)` when `timed()`. | The synchronous `.idx` open. It also counts in the store time through `windowGatedIndex.Get`. |
 | Cold ledger and event readers | At close time, read the first-use wait and call `sink.ObserveOpen`. See 4.4. | The open cost at the first blocking call. |
@@ -77,14 +78,14 @@ type ReadSink interface {
 
 ### 4.4 Open time for the lazy cold readers
 
-The open cost lands at the first blocking call, not at `OpenColdReader` (D6, facts F7 and F9). The plan:
+The open cost lands at the first blocking call, not at `OpenColdReader` (D6, D35, spec 6.4). The plan:
 
 - `stores/ledger/cold_reader.go`: add `openWait atomic.Int64` and `opened atomic.Bool` to `ColdReader`. Time the body of `loadHeader` (it waits on the background open through `c.r.Trailer()`). Add `func (c *ColdReader) OpenWait() (time.Duration, bool)`.
 - `stores/event/cold_reader.go`: add the same two fields. Add the elapsed time of the first `waitMeta` loader and of the first `validateMPHF` gate. Add `OpenWait() (time.Duration, bool)`.
 - In `query`, when `timed()`, wrap the reader's close function. The wrapper calls `OpenWait()`. If the reader did a blocking first use, it calls `sink.ObserveOpen(store, d)`. So one reader gives at most one open observation. A one-ahead reader that `ScanLedgers` opened but never read gives none.
 - The open wait is inside the first read, so it also counts in `fullhistory_read_store_seconds` (spec 6.4).
 
-Decision to record (next free D id): "The open time is measured at the first blocking call and observed when the reader closes, so each cold reader gives one observation." This is the closest faithful reading of D6 "Observe the open time at the reader's first blocking call".
+D35 sets this rule: the open time is measured at the first blocking call (`init`, `waitMeta`, the MPHF load) and observed once, when the reader closes. So each cold reader gives at most one observation.
 
 ### 4.5 Prometheus sink (`observability/read_metrics.go`)
 
@@ -94,9 +95,9 @@ func (m *ReadMetrics) ObserveStore(method string, store geometry.Kind, tier stri
 func (m *ReadMetrics) ObserveOpen(store geometry.Kind, d time.Duration)
 ```
 
-- Namespace `host.PrometheusNamespace` (`soroban_rpc`). Subsystem `fullhistory_read`. Names `store_seconds` and `open_seconds`. Full names: `soroban_rpc_fullhistory_read_store_seconds`, `soroban_rpc_fullhistory_read_open_seconds`. Spec 6.4 sets the namespace. No decision id covers it (D28 is about `load.toml`), so record it with the bucket decision below.
+- Namespace `host.PrometheusNamespace` (`soroban_rpc`). Subsystem `fullhistory_read`. Names `store_seconds` and `open_seconds`. Full names (D35, spec 6.4): `soroban_rpc_fullhistory_read_store_seconds`, `soroban_rpc_fullhistory_read_open_seconds`.
 - It is a separate type, not new methods on `observability.Metrics`. That interface has test implementations in `helpers_test.go`, `backfill/recorder_test.go` and `e2e_test.go`.
-- Bucket layout (choice of this PR): `prometheus.ExponentialBuckets(0.000025, 4, 10)` for both histograms: 25 µs, 100 µs, 400 µs, 1.6 ms, 6.4 ms, 25.6 ms, 102 ms, 410 ms, 1.64 s, 6.55 s. Reason: a hot RocksDB get is tens of µs; a cold getEvents page with opens is ms to s; factor 4 matches `phaseBuckets`. Series for the store histogram: 13 × 3 × 2 × (10 buckets + `+Inf` + `_sum` + `_count`) = 1,014 at most. Only used pairs appear.
+- Bucket layout (D35): `prometheus.ExponentialBuckets(0.000025, 4, 10)` for both histograms: 25 µs, 100 µs, 400 µs, 1.6 ms, 6.4 ms, 25.6 ms, 102 ms, 410 ms, 1.64 s, 6.55 s. Reason: a hot RocksDB get is tens of µs; a cold getEvents page with opens is ms to s; factor 4 matches `phaseBuckets`. Series for the store histogram: 13 × 3 × 2 × (10 buckets + `+Inf` + `_sum` + `_count`) = 1,014 at most. Only used pairs appear.
 - `phaseBuckets` stays for `phase_duration_seconds` only.
 
 ### 4.6 Wiring
@@ -167,6 +168,6 @@ git diff --stat feature/full-history -- . ':!*_test.go' ':!*.md'
 - Check first: no code asserts the concrete type of the reader that `ReadView.Events` or `ReadView.Ledgers` returns. A search of `query`, `adapters` and `eventsapi` at 91f158b found none. Search again on the PR base.
 - `time.Now` per iterator step costs about 20 to 40 ns. A `getLedgers` request reads at most one chunk (`walkSpanCap` = 10,000). The benchmark gives the real number.
 - A timed-out request keeps running and observes at `Release`, after the response. The storage share for such a method can read above 100%. Document it (4.7).
-- Decisions to record in the decision log in this PR: the metric namespace and subsystem, the bucket layout, and the open observation point (4.4). Use the next free D ids and mark them Proposed.
+- D35 fixes the metric names, the bucket layout, `NewRequestView`, the sink type and the open observation point (4.4). A change to any of them needs an amendment of D35 first.
 - `rpcv2test.WriteFrozenEventsChunk` ingests a full chunk of 10,000 ledgers. `backfill/process_test.go` `writeRealPack` does the same, so the run time is acceptable. Skip it in `-short` if it is slow.
 - PR 05 reuses `handlerParams.readSink`. If PR 05 lands first, PR 04 adds the field to `ServeDataset` too.

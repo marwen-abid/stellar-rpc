@@ -4,7 +4,7 @@
 |---|---|
 | Branch | `bench-campaign-v2/13-bench-live` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
-| Depends on | PR 05 (the shared `--profile-rates` flag in `P/bench/profile.go`). D25 (Confirmed). |
+| Depends on | PR 05 (the shared `--profile-rates` flag in `P/bench/profile.go`). D25 (confirmed; amended on 2026-09-30: the three `rpcv2.Options` fields, no `ServeReads` seam). |
 | Implements | D24 (flag on `bench-live`), D25; spec Sections 6.9 and 6.10; spec Section 10.1 row 13; requirement R7 (requirements-eval.md) |
 | Estimate | About 250 non-test lines: `P/daemon.go` 20, `P/bench/live.go` 160, `P/bench/live_source.go` 70, `cmd/stellar-rpc/rpcv2/main.go` 1 |
 
@@ -13,7 +13,7 @@
 After this PR, `stellar-rpc-v2 bench-live` runs the real daemon body (`startup.go` `run`) over a local ledger pack tree.
 It ingests the ledgers at the close interval, runs the lifecycle, and serves JSON-RPC on the same process.
 So a client (Blaster, later) can load a node while it ingests.
-The first delivery is the command and one local test. Campaign use is a later step (D25).
+PR 13 delivers the command and a local test only. Campaign use needs a new PR after PR 10 and PR 13 (D25).
 
 ## 2. Scope
 
@@ -25,7 +25,7 @@ The first delivery is the command and one local test. Campaign use is a later st
 
 ## 3. Out of scope (boundaries)
 
-- Campaign use (a runner step, `load.json` fields, Blaster flags): a later PR after PR 10. D25 says so.
+- Campaign use (a runner step, `load.json` fields, Blaster flags): a new PR after PR 10 and PR 13 (D25, spec 1.1).
 - Ingestion inside `bench-serve`: rejected by D25. `bench-serve` stays read-only (D5).
 - `bench-ingest hot` and `bench-serve` on one dataset at the same time: rejected by D25 (RocksDB read-only beside a writer is undefined).
 - A BSB or captive-core source for `bench-live`: not needed now (requirements-eval R4/R5).
@@ -58,7 +58,7 @@ NetworkPassphrase string           // used only with Core; empty ⇒ unknown
 
 - `RunDaemonWithOptions` copies them into `daemonOptions`. Add `networkPassphrase string` to `daemonOptions`.
 - `resolveCore`: for `opts.Core != nil`, return `resolvedCore{live: opts.Core, backfill: opts.Core, networkPassphrase: opts.networkPassphrase}`.
-- `ServeReads` stays nil: `bench-live` serves with the production `newServeReads`. D25 names the `ServeReads` seam; this PR does not need it. Say so in the PR description.
+- `ServeReads` stays nil: `bench-live` serves with the production `newServeReads`. D25 (amended): `bench-live` does not need the `ServeReads` seam, so `Options` gets no `ServeReads` field.
 
 ### 4.3 Live source (`P/bench/live_source.go`)
 
@@ -130,7 +130,7 @@ Run time: 300 ledgers at 20 ms is about 6 s, plus startup. The tests do not need
 
 ## 7. Done when
 
-- A local test ingests paced ledgers from a small pack tree. At the same time an HTTP client gets each new transaction with `getTransaction`: `go test ./cmd/stellar-rpc/internal/rpcv2/bench -run TestBenchLive_ServesTransactionsWhileIngesting -race`.
+- A local test ingests paced ledgers from a pack tree of 300 ledgers. At the same time an HTTP client gets each new transaction with `getTransaction`: `go test ./cmd/stellar-rpc/internal/rpcv2/bench -run TestBenchLive_ServesTransactionsWhileIngesting -race`.
 
 ## 8. Verification before push
 
