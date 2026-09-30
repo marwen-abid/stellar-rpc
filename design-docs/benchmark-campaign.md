@@ -208,8 +208,13 @@ Start sequence:
    `PublishHandle`.
 6. Get the latest ledger with `lastCommittedLedger`, as the daemon does (D3). On
    a cold dataset the empty frontier chunk refines nothing, so it is the last
-   cold ledger. Call `SetLatestLedger` with it and the close time of its ledger
-   header. Then call `adapters.SeedCloseTimes`.
+   cold ledger. Call `SetLatestLedger` with it and `query.UnknownCloseTime()`.
+   Then call `adapters.SeedCloseTimes`. It reads the header of the latest
+   ledger and calls `SetLatestLedger(latest, CloseTimeAt(...))` itself.
+   `getHealth.oldestLedger` is the first ledger of the earliest chunk. On a cold
+   dataset we expect it to equal the first ledger of `start_chunk`: the
+   retention size is 0 and `config:earliest_ledger` gives the earliest chunk
+   (check in PR 05).
 7. Build the configuration with `config.ParseConfig(nil)`. Set
    `[service].endpoint`, `[service].admin_endpoint` and
    `[service.methods.getHealth].max_healthy_ledger_latency` = `1000000h` (D3).
@@ -257,7 +262,9 @@ sink type is `observability.ReadMetrics`.
   `waitMeta`, the MPHF load) and observe it once, when the reader closes. For
   `txhash`, time `txhash.OpenColdReader`. Open time also counts in the store
   histogram.
-- PR 04 makes `resolveLedgers` and `ReadView.Events` return the tier.
+- PR 04 makes `resolveLedgers` return the tier. The signature of
+  `ReadView.Events` does not change. Its tier comes from its internal resolve
+  step (`resolveTier`).
 
 Storage share per method = Δ `_sum` of the store histogram ÷ Δ `_sum` of
 `soroban_rpc_json_rpc_request_duration_seconds`, for the same method, between
@@ -491,7 +498,9 @@ the benchmarks repository leaves out `logs/`.
 
 `runs[].status` is `ok`, `failed` or `skipped`. `pageCache` is `dropped` or
 `kept`. `benchServeExitCode` is the exit code of the `bench-serve` process that
-served the run; on the hot tier all runs share one process.
+served the run. On the hot tier `bench-serve` starts once and all runs share
+one process. So `serveReadySeconds` and `benchServeExitCode` have the same
+value in each run entry.
 `<level>rps/blaster.toml` holds the rendered mix of the run.
 
 ### 7.2 `results.json` (bench commands)
@@ -501,7 +510,7 @@ Example for `bench-ingest hot` (numbers invented):
 ```json
 {
   "schemaVersion": 1, "command": "ingest-hot",
-    "binary": {"version": "v2.0.0-dev", "commit": "91f158b…", "buildTimestamp": "2026-10-01T10:31:07Z"},
+    "binary": {"version": "v2.0.0-dev", "commit": "91f158b…", "buildTimestamp": "2026-10-01T10:31:07"},
   "hostname": "ip-10-0-1-17",
   "startedAt": "2026-10-01T10:45:00Z", "finishedAt": "2026-10-01T17:26:45Z", "status": "ok", "error": "",
   "parameters": {"startChunk": 1, "numChunks": 2, "numLedgers": 0, "closeInterval": "2s",
@@ -519,8 +528,12 @@ In the example, the unpaced ledgers take about 4,100 s (10,000 × 0.41 s). The
 paced ledgers take about 20,000 s, so the step takes 6 h 42 m. Rules:
 
 1. Each measurement has a name and a unit, and one unit in each field (D12). All
-   values are integers. `unit` is `ns` for durations, `bytes` for sizes and
-   `count` for counts. The converter converts units.
+   measurement values are integers. `unit` is `ns` for durations, `bytes` for
+   sizes and `count` for counts. `count` is defined for future rows; no
+   `bench-ingest` row uses it today. The converter converts units. The integer
+   rule applies to `results.json` measurements only. `campaign.json` and
+   `load.json` give seconds as floats (`seconds`, `serveReadySeconds`,
+   `benchServeSeconds`).
 2. A measurement name is `<group>.<row>` (D34). The group is the CSV file stem:
    `driver`, `hot`, `ledgers`, `txhash` or `events`. The row is the CSV row name
    without a unit suffix: `driver.ingest_total`, `driver.peak_rss`
@@ -530,6 +543,8 @@ paced ledgers take about 20,000 s, so the step takes 6 h 42 m. Rules:
 4. `items` is the CSV `n_items` count. The converter derives the hot
    `ledgers_per_s` from `driver.run_wall` `items`.
 5. `binary` has `version`, `commit` (the full hash) and `buildTimestamp`.
+   `buildTimestamp` is the value of `BUILD_TIMESTAMP` in the `Makefile`:
+   `date '+%Y-%m-%dT%H:%M:%S'`, local time of the build machine, with no zone.
    `hostname` is the name of the machine.
 6. `command` is the step kind: `ingest-cold`, `ingest-hot` or `freeze`.
 7. `status` is `running`, `ok` or `failed`. The command writes the file with
@@ -563,7 +578,8 @@ with every step `pending`. The runner adds `commit`, `runnerCommit`, `machine`,
              "machine": "2x", "workers": 8, "pacedLedgers": 10000, "name": "cl2s-2x", "publish": "no"},
   "load": {"packs_prefix": "s3://stellar-rpc-bench/inputs/…", "run_duration": "60s", "generate_count": 200,
            "profile": false, "level": [{"rps": 250, "rng_seed": 1}, "…"], "mix": {"getTransaction": 60, "…": 0},
-           "estimate": {"setup_minutes": 60, "…": 0}, "blaster": {"commit": "aadc1a1…"}},
+           "estimate": {"setup_minutes": 60, "…": 0},
+           "blaster": {"repo": "https://github.com/stellar/stellar-rpc-blaster", "commit": "aadc1a1…"}},
     "profiles": [{"name": "sac-6000", "datasetKind": "synthetic", "networkPassphrase": "<passphrase>", "startChunk": 1,
                 "numChunks": 2, "packs": {"expectedBytes": 20954563902, "bytes": 20950000000, "seconds": 212.0}}],
   "commit": "91f158b45951545923c0f74d81a6b8be33aed683", "runnerCommit": "91f158b45951545923c0f74d81a6b8be33aed683",
@@ -578,7 +594,8 @@ with every step `pending`. The runner adds `commit`, `runnerCommit`, `machine`,
 
 Rules:
 
-- `load` is a copy of `load.toml` with the same key names.
+- `load` is a copy of `load.toml` with the same key names. `load.blaster` has
+  `repo` and `commit` (Section 6.7). The key is absent before PR 10.
 - `profiles[].packs.expectedBytes` comes from the Go table. The runner writes
   `bytes` and `seconds` when it has the packs.
 - `steps[].status` is `pending`, `running`, `ok`, `failed`, `crashed` or
@@ -603,6 +620,10 @@ rule 10). The keys of `percentiles_ms` are `p50.0`, `p95.0`, `p99.0` and
 - `blaster.json` has no schema version, so `load.json` records `blasterCommit`.
   The converter supports the fields of that exact commit. It fails with a named
   error when the top-level or per-endpoint keys differ.
+- Blaster leaves out the per-endpoint keys `timeline` and `archetypes` when
+  they are empty (`writeEndpoint` in
+  `cmd/stellar-rpc-blaster/internal/run/metrics/results.go`). The converter's
+  key check treats these two keys as optional.
 - An aborted run writes `aborted: true`. We think that it keeps the
   `--step-interval` windows that completed before the abort (not verified; check
   in PR 10).
@@ -651,9 +672,9 @@ until Marwen renames it.
 | 00 | `spec` | This spec and the decision log. | — | The team agrees. |
 | 01 | `readonly-open` | `hotchunk.OpenReadOnlyWithEvents`, `catalog.OpenReadOnly`, removal of the ledgers-only comments (Section 6.2). | — | The file-set test passes on a hot chunk directory. `catalog.OpenReadOnly` fails on a missing catalog and writes no file. |
 | 02 | `ingest-catalog` | Keep the catalog at `<dataset>/catalog/rocksdb`, pin the earliest ledger, the frontier chunk in `cold`, the existence check, removal of `--catalog-dir` (Section 6.1 item 1). | — | A cold run and a hot run each leave a catalog. `query.NewReadView` succeeds on both catalogs. A second run into the same dataset fails and writes no file. |
-| 03 | `ingest-results` | `results.json` writer (temporary file and rename, `status`), schema README, `--paced-ledgers`. CSV kept (Section 6.1 items 2 to 4, Section 7.2). | — | A cold run and a hot run each write a `results.json` that matches the README. A killed run leaves `status: running`. With `--paced-ledgers 100`, `driver.ingest_total` has 100 samples. |
+| 03 | `ingest-results` | `results.json` writer (temporary file and rename, `status`), schema README, `--paced-ledgers`. CSV kept. Section 6.1 items 2 to 3, and the README documents item 4 (runner flags built in PR 07). Section 7.2. | — | A cold run and a hot run each write a `results.json` that matches the README. A killed run leaves `status: running`. With `--paced-ledgers 100`, `driver.ingest_total` has 100 samples. |
 | 04 | `storage-metrics` | Storage metrics (Section 6.4). Documentation in `docs/MONITORING.md` and the metrics table of `docs/ARCHIVE-NODE-BETA-RUNBOOK.md`. | — | One request records one observation for each store and tier it used. A view with no method name records nothing. A microbenchmark gives the cost of one accumulate-and-observe pair. A test with a slow yield body shows no change in the store histogram. A cold `getEvents` page records a non-zero open observation. |
-| 05 | `bench-serve` | `rpcv2.ServeDataset`, the command, the method filter, the admin registry, the shared `--profile-rates` flag on `bench-ingest` and `bench-serve` (Sections 6.3, 6.9). | 01, 02 | A test calls each served method over HTTP on a cold and a hot test dataset. Other methods return -32601. The file-set test over the dataset passes. An empty `--network-passphrase` fails at start. |
+| 05 | `bench-serve` | `rpcv2.ServeDataset`, the command, the method filter, the admin registry, the shared `--profile-rates` flag on `bench-ingest` and `bench-serve` (Sections 6.3, 6.9). | 01, 02 | A test calls each served method over HTTP on a cold and a hot test dataset. Other methods return -32601. The file-set test over the dataset passes. An empty `--network-passphrase` fails at start. On the cold test dataset, `getHealth.oldestLedger` equals the first ledger of `start_chunk` (check in PR 05, Section 6.3 item 6). |
 | 06 | `campaign-plan` | `cmd/bench-campaign` `plan`, `validate`, `estimate`, `load.toml`, the `campaign.json` schema (Sections 6.5, 7.3). | — | `plan` writes a valid `campaign.json` for each close interval. `validate` rejects each bad input. A test checks the estimate against the formula. |
 | 07 | `campaign-run` | `run`: the pack fetch, the build of `ref`, the subcommand check, the ingest and freeze steps, the bundle, the step statuses, `steps[].datasetBytes` (Sections 4, 6.5, 7.1). | 03, 06 | A local end-to-end test on a pack tree of 2 chunks writes a valid bundle. A killed step leaves a valid `campaign.json`. |
 | 08 | `box` | Bootstrap port, user-data stub, box script with an S3 upload for each step, push to `bundle/<id>`, `slack-payload.sh` and `slack-campaign.jq` rewritten to read `campaign.json`, `poweroff`, script tests (Section 6.6). | 07, Q2 | The script tests pass. They cover a runner crash, an S3 failure, a push failure and a Slack failure, and check the finish order of Section 6.6. |

@@ -6,7 +6,7 @@
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
 | Depends on | None. The pack passphrase must be known (Q10, Section 9). |
 | Implements | D10, D15 (plan, validate, estimate part), D21 (dataset shape), D28, D29, D33 (step list); spec 4, 5, 6.5, 7.3 |
-| Estimate | About 590 non-test lines: `main.go` 80; `internal/campaign` 240 (types 90, file I/O 40, validate 110); `internal/plan` 235 (profiles 40, plan 100, `load.toml` parser 65, estimate 30); `load.toml` 35; workflow 1 |
+| Estimate | About 590 non-test lines: `main.go` 80; `internal/campaign` 190 (types 90, file I/O 40, field checks 60); `internal/plan` 285 (profiles 40, plan 100, `load.toml` parser 65, estimate 30, validate 50); `load.toml` 35; workflow 1 |
 
 ## 1. Goal
 
@@ -19,8 +19,8 @@ After this PR, `cmd/bench-campaign` is a Go program with three subcommands.
 ## 2. Scope
 
 - New program `cmd/bench-campaign/main.go`: a cobra root with `plan`, `validate` and `estimate`.
-- New package `cmd/bench-campaign/internal/campaign`: the `campaign.json` Go types, strict read, atomic write and `Validate`.
-- New package `cmd/bench-campaign/internal/plan`: the profile table, the step list, the `load.toml` parser, the level rendering and the estimate.
+- New package `cmd/bench-campaign/internal/campaign`: the `campaign.json` Go types, strict read, atomic write, `Inputs.Validate` and `Load.Validate`.
+- New package `cmd/bench-campaign/internal/plan`: the profile table, the step list, `Validate`, the `load.toml` parser, the level rendering and the estimate.
 - New file `cmd/bench-campaign/load.toml` (D28), embedded in the binary with `//go:embed`.
 - New file `cmd/bench-campaign/README.md`: the subcommands and the `campaign.json` schema.
 - Modify `.github/workflows/stellar-rpc.yml`: add `./cmd/bench-campaign/...` to the `go test -race` line.
@@ -42,7 +42,7 @@ After this PR, `cmd/bench-campaign` is a Go program with three subcommands.
 - Today `cmd/` holds only `cmd/stellar-rpc`. Add `cmd/bench-campaign` next to it.
 - Go's internal rule forbids an import of `cmd/stellar-rpc/internal/...` from `cmd/bench-campaign`. So the program copies no rpcv2 constant by import. It states the chunk formula (`c × 10000 + 2`, `P/chunk/chunk.go`) in `internal/plan`.
 - The program must not use cgo. The GitHub runner builds it with `CGO_ENABLED=0 go build ./cmd/bench-campaign` and no native libraries (PR 09).
-- Packages: `internal/campaign` (schema, no policy), `internal/plan` (policy: profiles, steps, load, estimate). PR 07 adds `internal/run`. PR 10 adds `internal/loadstep`.
+- Packages: `internal/campaign` (schema, no policy), `internal/plan` (policy: profiles, steps, load, estimate, `Validate`). `internal/plan` imports `internal/campaign`, and `internal/campaign` imports no other package of the program. `Validate` compares the steps with `plan.Steps`, so it is in `internal/plan`. This prevents an import cycle. PR 07 adds `internal/run`. PR 10 adds `internal/loadstep`.
 
 ### 4.2 Take from the benchmarks runner
 
@@ -164,15 +164,15 @@ type Step struct { Name, Kind, Profile, Tier string; Run int; LoadLevelRps []int
 - `status` is `pending` for every step.
 - `pacedLedgers` must not exceed `numChunks × 10000`.
 
-### 4.8 `Validate(c *Campaign) error`
+### 4.8 `plan.Validate(c *campaign.Campaign) error` (`internal/plan/validate.go`)
 
-One function. `validate`, `estimate` and PR 07 `run` call it after `Read`. `plan` calls `Inputs.Validate` on the flags, builds the campaign, then calls `Validate` on the result.
-- `inputs`: the Section 4.2 rules; runs 1 to 5; workers 1 to 128; pacedLedgers 0 to 20,000; publish `yes|no`.
+One function. `validate`, `estimate` and PR 07 `run` call it after `campaign.Read`. `plan` calls `Inputs.Validate` on the flags, builds the campaign, then calls `Validate` on the result.
+- `inputs`: `c.Inputs.Validate()`, the Section 4.2 rules; runs 1 to 5; workers 1 to 128; pacedLedgers 0 to 20,000; publish `yes|no`.
 - `id` = `<inputs.name>-<digits>`.
 - `load.packs_prefix`: `s3://` or `file://` (PR 07 tests use `file://`), plus the URI character set.
 - `load`: the Section 4.5 rules (`Load.Validate`).
 - `profiles`: unique names that match the name rule; `datasetKind` is `synthetic` or `pubnet`; the passphrase is not empty; `numChunks >= 1`. `Validate` does not compare profiles with the Go table. So a test can use its own profile.
-- `steps`: the names, in order, equal `plan.Steps(inputs, profiles, load)`; `tier` is set on load and freeze steps only; each status is one of `pending`, `running`, `ok`, `failed`, `crashed`, `skipped`.
+- `steps`: the names, in order, equal `Steps(inputs, profiles, load)`; `tier` is set on load and freeze steps only; each status is one of `pending`, `running`, `ok`, `failed`, `crashed`, `skipped`.
 - `Validate` returns all failures joined with `errors.Join`, one per line.
 
 ### 4.9 Estimate (`plan.Estimate(c) (minutes int, terms []Term)`)
@@ -195,11 +195,12 @@ Round the sum up to whole minutes. Example: `2s`, `all`, runs 1, paced 10,000. T
 | `cmd/bench-campaign/load.toml` | new | D28 values | 35 |
 | `cmd/bench-campaign/internal/campaign/campaign.go` | new | types, status and kind constants | 90 |
 | `cmd/bench-campaign/internal/campaign/file.go` | new | `Read`, `Write` | 40 |
-| `cmd/bench-campaign/internal/campaign/validate.go` | new | `Inputs.Validate`, `Validate` | 110 |
+| `cmd/bench-campaign/internal/campaign/validate.go` | new | `Inputs.Validate`, `Load.Validate` | 60 |
 | `cmd/bench-campaign/internal/plan/profiles.go` | new | profile table, machines | 40 |
 | `cmd/bench-campaign/internal/plan/plan.go` | new | `Plan(inputs, load, runID)`, `Steps` | 100 |
 | `cmd/bench-campaign/internal/plan/load.go` | new | `ParseLoad`, `renderMix` | 65 |
 | `cmd/bench-campaign/internal/plan/estimate.go` | new | `Estimate`, `Term` | 30 |
+| `cmd/bench-campaign/internal/plan/validate.go` | new | `Validate` | 50 |
 | `cmd/bench-campaign/README.md` | new | subcommands, schema (not counted) | — |
 | `.github/workflows/stellar-rpc.yml` | modify | test `./cmd/bench-campaign/...` | 1 |
 
@@ -207,12 +208,12 @@ Round the sum up to whole minutes. Example: `2s`, `all`, runs 1, paced 10,000. T
 
 | Test | Package/file | What it proves | How |
 |---|---|---|---|
-| `TestPlanEachCloseInterval` | `plan/plan_test.go` | `plan` writes a valid file for `2s`, `1s`, `600ms` | Table test; `Plan` then `campaign.Validate`; check profile names and step count (3 × 5 for `all`). |
+| `TestPlanEachCloseInterval` | `plan/plan_test.go` | `plan` writes a valid file for `2s`, `1s`, `600ms` | Table test; `Plan` then `Validate`; check profile names and step count (3 × 5 for `all`). |
 | `TestStepsPerChoice` | `plan/plan_test.go` | Each of the six `steps` choices gives the spec 5 kinds in order; freeze follows load-hot; only load and freeze steps have `tier` | Compare names and tiers. |
 | `TestRenderMix` | `plan/load_test.go` | 250/500/1000 give the spec 6.7 integers; the sum equals the level | Table test. |
 | `TestParseLoadRejects` | `plan/load_test.go` | An unknown key, a seed of 0, a mix sum of 99, an unknown method each fail | Strings in the test; `ParseLoad(strings.NewReader(...))`. |
 | `TestEmbeddedLoadValid` | `plan/load_test.go` | The embedded `load.toml` parses and validates; `campaign.json.load` has the same key names as `load.toml` | Read `../../load.toml`; decode it and the marshaled `load` into `map[string]any` and compare the key sets. |
-| `TestValidateRejects` | `campaign/validate_test.go` | Each bad input fails with its key named: runs 0 and 6, workers 129, paced 20,001, name `-x` and `a b`, ref `-r`, machine `4x`, close interval `3s`, steps `x`, publish `maybe`, bad id, bad prefix, a renamed step, a `tier` on an ingest step, a status `done`, an unknown JSON field, `schemaVersion` 2 | One valid campaign from a helper `validCampaign(t)`; each case mutates one field. |
+| `TestValidateRejects` | `plan/validate_test.go` | Each bad input fails with its key named: runs 0 and 6, workers 129, paced 20,001, name `-x` and `a b`, ref `-r`, machine `4x`, close interval `3s`, steps `x`, publish `maybe`, bad id, bad prefix, a renamed step, a `tier` on an ingest step, a status `done`, an unknown JSON field, `schemaVersion` 2 | One valid campaign from a helper `validCampaign(t)`; each case mutates one field. Each case writes the file to `t.TempDir()`, then calls `campaign.Read` and `Validate`. The unknown field and `schemaVersion` 2 cases edit the JSON bytes and fail in `Read`. |
 | `TestWriteReadRoundTrip` | `campaign/file_test.go` | `Write` then `Read` gives the same value; no temporary file remains | `t.TempDir()`. |
 | `TestEstimateFormula` | `plan/estimate_test.go` | The estimate equals the Section 4.9 sum | A hand-computed campaign: 1 profile, `all`, paced 100 at `2s`; compare with the formula in the test. |
 | `TestMainNoCgo` | `main_test.go` | The program builds with `CGO_ENABLED=0` | `exec.Command("go", "build", "-o", tmp, ".")` with `CGO_ENABLED=0`. |
@@ -223,7 +224,7 @@ There are no rpcv2test helpers here: the program imports no rpcv2 package.
 ## 7. Done when
 
 - `plan` writes a valid `campaign.json` for each close interval: `go test ./cmd/bench-campaign/internal/plan -run TestPlanEachCloseInterval`.
-- `validate` rejects each bad input: `go test ./cmd/bench-campaign/internal/campaign -run TestValidateRejects`.
+- `validate` rejects each bad input: `go test ./cmd/bench-campaign/internal/plan -run TestValidateRejects`.
 - A test checks the estimate against the formula: `go test ./cmd/bench-campaign/internal/plan -run TestEstimateFormula`.
 - The program builds without cgo: `CGO_ENABLED=0 go build ./cmd/bench-campaign`.
 
