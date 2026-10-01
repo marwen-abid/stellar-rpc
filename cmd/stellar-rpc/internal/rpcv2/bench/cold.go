@@ -38,15 +38,10 @@ type coldOptions struct {
 	// index builds.
 	Workers int
 
-	// ColdRoot is the output root the artifacts land under, laid out by
-	// geometry.NewLayout. It is scratch: a re-run over the same range
-	// overwrites freely, but artifacts from other ranges are left in place and
-	// can look valid to later tooling, so point each run at a fresh dir.
+	// ColdRoot is the dataset root, laid out by geometry.NewLayout: the cold
+	// artifacts, the catalog, and the empty frontier hot chunk after the range.
+	// It must not already hold a catalog.
 	ColdRoot string
-
-	// CatalogDir is the base dir the run-scoped scratch catalog is created
-	// under. Empty means ColdRoot.
-	CatalogDir string
 
 	// OutDir receives the CSV report.
 	OutDir string
@@ -64,10 +59,12 @@ func (o coldOptions) validate() error {
 	if o.Workers < 1 {
 		return fmt.Errorf("--workers must be >= 1, got %d", o.Workers)
 	}
-	// uint64 so StartChunk+NumChunks-1 cannot itself wrap before the compare.
-	if end := uint64(o.StartChunk) + uint64(o.NumChunks) - 1; end > uint64(maxChunkID) {
-		return fmt.Errorf("--start-chunk=%d with --num-chunks=%d ends at chunk %d, past the last valid chunk ID %d",
-			uint32(o.StartChunk), o.NumChunks, end, uint32(maxChunkID))
+	// uint64 so the sum cannot wrap. The frontier chunk end+1 must be a valid
+	// chunk ID too.
+	if end := uint64(o.StartChunk) + uint64(o.NumChunks) - 1; end+1 > uint64(maxChunkID) {
+		return fmt.Errorf("--start-chunk=%d with --num-chunks=%d ends at chunk %d; "+
+			"the frontier chunk %d is past the last valid chunk ID %d",
+			uint32(o.StartChunk), o.NumChunks, end, end+1, uint32(maxChunkID))
 	}
 	if o.ColdRoot == "" {
 		return errors.New("--cold-out-dir is required")
@@ -85,13 +82,18 @@ func (o coldOptions) validate() error {
 }
 
 // runCold benchmarks the cold path: one backfill.RunBackfill over the
-// requested chunk range, against a fresh scratch catalog so the run is a clean
-// backfill from empty. As the backfill runs, the sink collects its per-stage
-// MetricSink timings and the scheduler's observability metrics. On success
-// runCold writes the CSV report and logs a summary, including the effective
-// chunk concurrency for multi-chunk runs.
+// requested chunk range into a new dataset whose catalog pins the earliest
+// ledger to the range's first ledger. As the backfill runs, the sink collects
+// its per-stage MetricSink timings and the scheduler's observability metrics.
+// On success runCold creates the frontier hot chunk after the range, writes the
+// CSV report and logs a summary, including the effective chunk concurrency for
+// multi-chunk runs.
 func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) error {
 	if err := opts.validate(); err != nil {
+		return err
+	}
+	layout := geometry.NewLayout(opts.ColdRoot)
+	if err := checkNoCatalog(layout); err != nil {
 		return err
 	}
 	// Surface an unwritable --out before the run.
@@ -99,23 +101,18 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		return fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
 	}
 	// Create and fsync the write roots up front — the daemon's own root prep.
-	layout := geometry.NewLayout(opts.ColdRoot)
 	if err := config.PrepareRoots(
 		layout.LedgersRoot(), layout.EventsRoot(), layout.EventsIndexRoot(),
-		layout.TxHashRawRoot(), layout.TxHashIndexRoot(),
+		layout.TxHashRawRoot(), layout.TxHashIndexRoot(), layout.HotRoot(),
 	); err != nil {
 		return fmt.Errorf("prepare --cold-out-dir write roots: %w", err)
 	}
 
-	catalogBase := opts.CatalogDir
-	if catalogBase == "" {
-		catalogBase = opts.ColdRoot
-	}
-	cat, releaseCat, err := openScratchCatalog(catalogBase, layout, logger)
+	cat, err := createDatasetCatalog(layout, opts.StartChunk, logger)
 	if err != nil {
 		return err
 	}
-	defer releaseCat()
+	defer cat.Close()
 
 	backend, release, err := openSource(ctx, opts.Source)
 	if err != nil {
@@ -146,6 +143,9 @@ func runCold(ctx context.Context, logger *supportlog.Entry, opts coldOptions) er
 		return fmt.Errorf("backfill [%s,%s]: %w", opts.StartChunk, end, err)
 	}
 	totalWall := time.Since(start)
+	if err := createFrontierChunk(cat, end+1, logger); err != nil {
+		return err
+	}
 
 	sink.logSummary(logger)
 	logColdWall(logger, sink, opts.NumChunks, totalWall)
