@@ -46,7 +46,7 @@ tx-hash index size next to the cold `getTransaction` verdict. D13 ends here.
 
 - `load.json` (spec 7.1): `schemaVersion`, `step`, `blasterCommit`,
   `startedAt`, `finishedAt`, `status`, `error`, `runs[]`. Each run has
-  `loadLevelRps`, `rngSeed`, `pageCache` (`dropped` or `kept`),
+  `loadLevelRps`, `rngSeed`, `pageCache` (`dropped`, `warmed` or `kept`),
   `serveReadySeconds`, `benchServeExitCode`, `cpu` (`benchServeGomaxprocs`,
   `blasterGomaxprocs`, `benchServeSeconds`, `blasterSeconds`), `startedAt`,
   `finishedAt`, `status` (`ok`, `failed` or `skipped`) and `error`.

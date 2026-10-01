@@ -5,7 +5,7 @@
 | Branch | `bench-campaign-v2/10-load-step` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
 | Depends on | PR 04 (storage metrics in the dumps), PR 05 (`bench-serve`), PR 07 (the runner and the load hook). Q1 (Blaster pin). Q3, Q4 and Q8 are decided in this PR. |
-| Implements | D2, D14, D20 (one-hash check), D22, D24 (`profile = true`), D28 (`rng_seed`, integer rps), D38 (the clone, `cloneSeconds`); spec 6.2 (clone), 6.5 (Blaster build, `--page-cache`, `--profile`), 6.7, 6.9, 7.1, 7.4, 9 (`run-blaster.sh`) |
+| Implements | D2, D14, D20 (one-hash check), D22 (the drop, the hot warm step), D24 (`profile = true`), D28 (`rng_seed`, integer rps), D38 (the clone, `cloneSeconds`); spec 6.2 (clone), 6.5 (Blaster build, `--page-cache`, `--profile`), 6.7, 6.9, 7.1, 7.4, 9 (`run-blaster.sh`) |
 | Estimate | About 600 non-test lines: `internal/loadstep/load.go` 150, `serve.go` 120, `clone.go` 25, `blaster.go` 110, `probe.go` 70, `cache_linux.go` + `cache_other.go` 50, `internal/run` hook and flags 45, `load.toml` `[blaster]` 4, `campaign` 20, `load-test-coordinator.yml` 5 (deletions of `endpoint-load-test/` not counted, D32) |
 
 ## 1. Goal
@@ -22,7 +22,7 @@ The PR records the decisions for Q3, Q4 and Q8.
 - `loadstep/clone.go`: make and delete the clone of a dataset (spec 6.2, D38), with the plain-copy fallback.
 - `loadstep/blaster.go`: the Blaster build, `generate`, `run` and `blaster.toml`.
 - `loadstep/probe.go`: the one-hash `getTransaction` check, the `/metrics` dumps and the CPU profile.
-- `loadstep/cache_linux.go`, `cache_other.go`: the page-cache drop, with the #13 `evict_linux.go` fallback.
+- `loadstep/cache_linux.go`, `cache_other.go`: the page-cache drop, with the #13 `evict_linux.go` fallback, and the warm step of the hot clone.
 - Modify `internal/run`: replace `skipLoad`, add `--page-cache drop|keep` and `--profile`, pass `--cpuprofile` to bench command steps, build Blaster at startup. Modify `load.toml`: add `[blaster]`.
 - Decide `perf-eval/endpoint-load-test/` (4.7).
 
@@ -48,12 +48,12 @@ The PR records the decisions for Q3, Q4 and Q8.
 
 `func Run(ctx context.Context, s *campaign.Step, env Env) error`, with `Env{Bin, Blaster, Dataset, StepDir, Profile campaign.Profile, Load campaign.Load, PageCache string, CPUProfile bool}`. `CPUProfile` is `load.profile` or `run --profile`.
 
-1. `clone.Make(dataset)` (4.3a), then `serve.Start`: `<bin> bench-serve --dataset <root>/<p>/run<N>/<tier>-clone --listen 127.0.0.1:8000 --admin-listen 127.0.0.1:8001 --network-passphrase <profile.networkPassphrase>` (spec 6.3). Stdout and stderr go to `<step dir>/bench-serve.log`. Add `--profile-rates` only when PR 05 has the flag and `CPUProfile` is set.
+1. `clone.Make(dataset)` (4.3a). Hot tier: `warmPageCache(clone)` (4.3). Then `serve.Start`: `<bin> bench-serve --dataset <root>/<p>/run<N>/<tier>-clone --listen 127.0.0.1:8000 --admin-listen 127.0.0.1:8001 --network-passphrase <profile.networkPassphrase>` (spec 6.3). Stdout and stderr go to `<step dir>/bench-serve.log`. Add `--profile-rates` only when PR 05 has the flag and `CPUProfile` is set.
 2. `serve.WaitReady`: POST `{"jsonrpc":"2.0","id":1,"method":"getHealth"}` to `http://127.0.0.1:8000` once per second. Ready = HTTP 200 and a JSON-RPC `result`. Stop at 30 minutes and fail the step. Record `serveReadySeconds`. Do not read the `ready` log line (spec 11 rule 6).
 3. `blaster generate --rpc-url http://127.0.0.1:8000 --ledger-window <first>,<last> --count <generate_count> --output <step dir>/seed.json`. `<first>` and `<last>` are `oldestLedger` and `latestLedger` of the ready `getHealth` answer (D22, spec 6.7 item 3). The runner does not compute them from chunks. On a cold dataset `<last>` is the last cold ledger. With two values the window is exact (`seed.GetLedgerRange`, case 2). Output to `logs/<step>.log`.
 4. One-hash check: read `tx_hashes[0]` from `seed.json` (`seed_data.go` tag `tx_hashes`). POST `getTransaction` with `{"hash": ...}`. Fail the step when `result.status` is `NOT_FOUND`, with `error: "getTransaction NOT_FOUND for a seed hash: check the network passphrase"` (D20). An empty `tx_hashes` also fails.
 5. For each level in `step.loadLevelRps` (one Blaster run each), in a subdirectory `<level>rps/`:
-   1. Cold tier: `serve.Stop` (as in item 6), `clone.Remove`, `clone.Make`, `dropPageCache(env.PageCache, clone)`, `serve.Start`, `serve.WaitReady`. Hot tier: keep the cache, the clone and the running process.
+   1. Cold tier: `serve.Stop` (as in item 6), `clone.Remove`, `clone.Make`, `dropPageCache(env.PageCache, clone)`, `serve.Start`, `serve.WaitReady`. Hot tier: keep the warmed clone and the running process.
    2. Write `blaster.toml`: `rng_seed = <level.rng_seed>` and one `[endpoints.<method>]` table with `rps = <n>` per method of `renderMix(level.rps, load.mix)` (PR 06). Do not write `input_data_path`: `configs.go` fails when both the flag and the key are set.
    3. GET `http://127.0.0.1:8001/metrics` into `metrics-before.txt`.
    4. `blaster run --rpc-url http://127.0.0.1:8000 --config-path <level>rps/blaster.toml --input-data-path <step dir>/seed.json --duration <run_duration> --error-percent 100 --step-interval 5s --test-output-path <level>rps/blaster.json`. No `--ramp-up`. `--step-interval 5s` is the default; pass it so the argv in the step log is complete.
@@ -67,7 +67,9 @@ The PR records the decisions for Q3, Q4 and Q8.
 
 ### 4.3 Page cache (D22)
 
-- `--page-cache drop|keep` on `run`, default `drop`. `drop` applies to the cold tier only. `runs[].pageCache` is `dropped` or `kept`; the hot tier always records `kept`.
+- `--page-cache drop|keep` on `run`, default `drop`. `drop` applies to the cold tier only. `runs[].pageCache` is `dropped` on the cold tier, or `kept` when `--page-cache keep` skips the drop. The hot tier always records `warmed`.
+- Linux keeps the page cache per inode, so a clone starts with no cached pages, also when the original is warm (facts, D22). Hot tier: after `clone.Make` and before `serve.Start`, `warmPageCache(clone)` reads every file of the clone once. When `exec.LookPath("vmtouch")` finds it, run `vmtouch -t <clone>`. Else walk the clone and run `cat <file>` on each regular file, with stdout to `/dev/null` (`exec.Command`, no shell). A failure of the warm step fails the step. Log the method (`vmtouch` or `cat`) to `logs/runner.log`.
+- The RocksDB block cache starts empty on both tiers. The Blaster load warms it; the runner does nothing for it.
 - As root: `unix.Sync()`, then write `3` to `/proc/sys/vm/drop_caches`.
 - Not root (a laptop): walk the clone and call `evictFile` on each regular file. Port `evict_linux.go` (`unix.Fadvise(fd, 0, 0, unix.FADV_DONTNEED)`) and `evict_other.go` from branch `origin/bench-query/02-read-path` (D1 allows them). `golang.org/x/sys v0.47.0` is already in `go.mod`. Log the method (`drop_caches` or `fadvise`) to `logs/runner.log`. On a platform without fadvise, fail when `drop` is set.
 
@@ -134,7 +136,7 @@ Q8, core sharing. Facts: Blaster and `bench-serve` share the box. 2x = m6id.2xla
 | `cmd/bench-campaign/internal/loadstep/clone.go` | new | `Make`, `Remove`, the plain-copy fallback | 25 |
 | `cmd/bench-campaign/internal/loadstep/blaster.go` | new | `BuildBlaster`, `generate`, `runBlaster`, `writeBlasterTOML` | 110 |
 | `cmd/bench-campaign/internal/loadstep/probe.go` | new | JSON-RPC call, one-hash check, `/metrics`, pprof, metric parse | 70 |
-| `cmd/bench-campaign/internal/loadstep/cache_linux.go`, `cache_other.go` | new | `dropPageCache`, `evictFile` | 50 |
+| `cmd/bench-campaign/internal/loadstep/cache_linux.go`, `cache_other.go` | new | `dropPageCache`, `evictFile`, `warmPageCache` | 50 |
 | `cmd/bench-campaign/internal/run/run.go`, `steps.go`, `main.go` | modify | hook, `--page-cache`, `--profile`, `--cpuprofile`, Blaster build | 45 |
 | `cmd/bench-campaign/internal/campaign/campaign.go`, `validate.go` | modify | `Blaster` in `Load` and its check | 20 |
 | `cmd/bench-campaign/load.toml` | modify | `[blaster]` | 4 |
@@ -149,7 +151,7 @@ Q8, core sharing. Facts: Blaster and `bench-serve` share the box. 2x = m6id.2xla
 | `TestNotFoundFailsStep` | `loadstep/load_test.go` | `NOT_FOUND` on the seed hash fails the step before any Blaster run | The fake serve answers `NOT_FOUND`. |
 | `TestReadyTimeout` | `loadstep/serve_test.go` | No answer until the limit fails the step | Limit injected as 2 s. |
 | `TestBlasterTOML` | `loadstep/blaster_test.go` | The TOML decodes into Blaster's shape: `rng_seed`, integer `rps`, no `input_data_path` | Decode with go-toml v1 into a local struct with the `configs.go` tags. |
-| `TestColdRestartsServe` | `loadstep/load_test.go` | Cold: one serve start and one clone per level plus the first, `pageCache: dropped`; hot: one start, one clone, `kept`, one exit code and one `cloneSeconds` on all runs | Count fake-serve starts and clones. |
+| `TestColdRestartsServe` | `loadstep/load_test.go` | Cold: one serve start and one clone per level plus the first, `pageCache: dropped`; hot: one start, one clone, one warm step before the start, `pageCache: warmed`, one exit code and one `cloneSeconds` on all runs | Count fake-serve starts and clones. |
 | `TestCloneMakeAndRemove` | `loadstep/clone_test.go` | `Make` copies every file of a dataset; `Remove` deletes the clone and leaves the dataset; `Remove` refuses a path without `-clone`; no clone stays after a failed step | A small tree in `t.TempDir()`; walk both trees. |
 | `TestCloneFallsBackToPlainCopy` | `loadstep/clone_test.go` | A failed reflink copy gives a plain copy and a log line | `t.TempDir()` on a filesystem without reflink (tmpfs or ext4 in CI), or a `cp` stub on `PATH` that fails for `--reflink=always`. |
 | `TestProfileFlag` | `run/steps_test.go` | `--profile` adds `--cpuprofile <step dir>/cpu.pprof` to ingest and freeze argv | Compare argv. |
@@ -182,4 +184,5 @@ Run one laptop load step against a PR 07 test dataset with the real Blaster, and
 - `process_cpu_seconds_total` and `go_sched_gomaxprocs_threads` depend on PR 05 registering the Go and process collectors. If PR 05 does not, read `/proc/<pid>/stat` fields 14 and 15 instead (about 15 more lines).
 - Estimate is about 600 lines with the clone. Q8 option B adds about 20. If the total goes over 600, move the Blaster build (4.1), the page-cache code (4.3) and the clone (4.3a) into 10a, and the sequence into 10b.
 - The clone must be on the filesystem of the dataset, or the reflink copy fails. `<dataset>-clone` is next to the dataset, so it is.
-- We think that the files of a reflink clone start with no cached pages (facts). Check it on the box: after a hot clone, read one file and compare `fincore` (util-linux) on the original and the clone. Record the result in the decision log.
+- Resolved (D22 amendment, 2026-10-01): the files of a reflink clone start with no cached pages, because Linux keeps the page cache per inode. The hot tier warms the clone (4.3), so the `fincore` check on the box is not necessary.
+- The warm step reads the whole dataset once per hot load step. With `cat` it takes about the size of the dataset at the NVMe read rate; `vmtouch` (installed by PR 08) does the same reads. Note the time in the PR description.

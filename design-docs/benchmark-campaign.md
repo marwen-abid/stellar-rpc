@@ -201,9 +201,14 @@ change. Nothing opens the original, so it does not change.
   rm -rf <dataset>-clone
   ```
   `bench-campaign run` on a laptop makes the clone itself, as on the box.
-- A clone does not change the page cache of the original. We think that the
-  files of a clone start with no cached pages (check in PR 10). The cold load
-  step drops the page cache after it makes the clone (Section 6.7).
+- **Page cache.** A clone does not change the page cache of the original.
+  Linux keeps the page cache per inode, so the files of a clone start with no
+  cached pages, also when the original is warm. After the clone and before
+  `bench-serve` starts, the hot load step reads every file of the clone once
+  (`vmtouch -t <clone>` if `vmtouch` is installed, else `cat` each file to
+  `/dev/null`). The cold load step drops the page cache after it makes the
+  clone (Section 6.7, D22). The RocksDB block cache starts empty on both tiers;
+  the Blaster load warms it.
 
 ### 6.3 `bench-serve` (new, PR 05)
 
@@ -408,7 +413,9 @@ method (getTransaction, getEvents, getTransactions, getLedgers): 250 → 150, 50
 one level, its `rng_seed` and its own subdirectory `<level>rps/` (Q4). A load
 step runs these steps in this order:
 
-1. Make a clone of the dataset (Section 6.2) and record its time. Start
+1. Make a clone of the dataset (Section 6.2) and record its time. Hot dataset
+   only: read every file of the clone once (`vmtouch -t <clone>` if `vmtouch`
+   is installed, else `cat` each file to `/dev/null`; D22). Start
    `bench-serve` on the clone. Each start appends its stdout and stderr to
    `<step dir>/bench-serve.log`.
 2. Poll `getHealth` on `--listen` one time each second until it answers. Stop at
@@ -427,7 +434,7 @@ step runs these steps in this order:
    1. Cold dataset only: stop `bench-serve` (as in item 7), delete its clone,
       make a new clone and run `sync; echo 3 > /proc/sys/vm/drop_caches` (the
       box runs as root). Then start and wait as in items 1 and 2. The hot
-      dataset keeps the cache, the clone and the running `bench-serve`.
+      dataset keeps the warmed clone and the running `bench-serve`.
    2. Write `<level>rps/blaster.toml`: `rng_seed` and one `[endpoints.<method>]`
       table with `rps` for each method.
    3. Save `/metrics` from `--admin-listen` to `metrics-before.txt`.
@@ -526,8 +533,10 @@ the benchmarks repository leaves out `logs/`.
 }
 ```
 
-`runs[].status` is `ok`, `failed` or `skipped`. `pageCache` is `dropped` or
-`kept`. `cloneSeconds` is the time to make the clone that the run served
+`runs[].status` is `ok`, `failed` or `skipped`. `pageCache` is `dropped` (cold:
+the runner dropped the page cache after the clone) or `warmed` (hot: the runner
+read every file of the clone once, D22). A local `run --page-cache keep` skips
+the cold drop and records `kept`. `cloneSeconds` is the time to make the clone that the run served
 (Section 6.2). `benchServeExitCode` is the exit code of the `bench-serve` process that
 served the run. On the hot tier `bench-serve` starts once and all runs share
 one process and one clone. So `cloneSeconds`, `serveReadySeconds` and

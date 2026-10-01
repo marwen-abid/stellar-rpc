@@ -5,7 +5,7 @@
 | Branch | `bench-campaign-v2/08-box` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
 | Depends on | PR 07 (`bench-campaign run`, `campaign.json` updates), Q2 (secret store, IAM grant). B2 must land before the first run with `publish=yes`. |
-| Implements | D16, D17, D31, D38 (XFS with reflink); spec Sections 4, 6.2, 6.6, 7.1 |
+| Implements | D16, D17, D22 (`vmtouch`), D31, D38 (XFS with reflink); spec Sections 4, 6.2, 6.6, 7.1 |
 | Estimate | about 550 non-test lines: `box-bootstrap.sh` 115, `user-data-stub.sh` 45, `render-user-data.sh` 40, `run-box.sh` 175, `slack-payload.sh` 75, `slack-campaign.jq` 70, `post-slack.sh` 29 |
 
 `PE` = `cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval`; `BC` = `PE/bench-campaign`.
@@ -84,7 +84,8 @@ this replaces the `mkfs.ext4 -m0` of the benchmarks script); `mount -o
 noatime` at `MOUNT` (default `/mnt/nvme`); `mkdir -p $MOUNT/bench`; the
 reflink check; the fsync probe (`dd ... oflag=dsync`, fail on `GB/s`, `FSYNC_PROBE_WARN_ONLY=1`);
 apt packages `build-essential curl git jq pkg-config cmake ninja-build unzip
-libsnappy-dev liblz4-dev zlib1g-dev`; the AWS CLI check; Go `go1.26.5` at
+libsnappy-dev liblz4-dev zlib1g-dev vmtouch` (`vmtouch` warms the hot clone,
+D22, PR 10); the AWS CLI check; Go `go1.26.5` at
 `/usr/local/go`; Rust `1.92.0` by rustup; zstd and RocksDB.
 
 `mkfs.xfs` is in `xfsprogs`. When `command -v mkfs.xfs` finds nothing, the
