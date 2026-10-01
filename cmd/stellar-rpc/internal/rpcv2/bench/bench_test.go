@@ -3,6 +3,7 @@ package bench
 import (
 	"context"
 	"encoding/csv"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,9 +18,13 @@ import (
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	supportlog "github.com/stellar/go-stellar-sdk/support/log"
 
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/adapters"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/catalog"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/geometry"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/query"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
 )
 
@@ -97,6 +102,69 @@ func txhashIndexPath(t *testing.T, layout geometry.Layout, lo, hi chunk.ID) stri
 	w := txLayout.TxHashIndexID(lo)
 	require.Equal(t, w, txLayout.TxHashIndexID(hi), "test range must stay inside one index window")
 	return layout.TxHashIndexFilePath(geometry.TxHashIndexCoverage{Index: w, Lo: lo, Hi: hi})
+}
+
+// openKeptCatalog opens the catalog a run left under root.
+func openKeptCatalog(t *testing.T, root string) *catalog.Catalog {
+	t.Helper()
+	layout := geometry.NewLayout(root)
+	txLayout, err := geometry.NewTxHashIndexLayout(geometry.ChunksPerTxhashIndex)
+	require.NoError(t, err)
+	cat, err := catalog.Open(layout.CatalogPath(), layout, txLayout, testLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.Close() })
+	return cat
+}
+
+// readViewOn builds a registry over cat with every ready hot chunk published
+// and latest as the tip, then asserts that a read view opens and that both
+// close-time edges can be read.
+func readViewOn(t *testing.T, cat *catalog.Catalog, latest uint32) {
+	t.Helper()
+	reg := query.NewRegistry(cat, rpcv2test.RetentionFor(t, cat, 0))
+	ready, err := cat.ReadyHotChunkKeys()
+	require.NoError(t, err)
+	for _, c := range ready {
+		db, err := hotchunk.OpenReadyView(geometry.HotReady, cat.Layout().HotChunkPath(c), c, testLogger())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		reg.PublishHandle(c, db)
+	}
+	reg.SetLatestLedger(latest, query.UnknownCloseTime())
+	view, err := reg.NewReadView()
+	require.NoError(t, err)
+	view.Release()
+	require.NoError(t, adapters.SeedCloseTimes(reg))
+}
+
+// fileInfo is the part of a file's metadata that a write changes.
+type fileInfo struct {
+	size    int64
+	modTime time.Time
+}
+
+// fileSet maps each path under root, relative to root, to its size and
+// modification time.
+func fileSet(t *testing.T, root string) map[string]fileInfo {
+	t.Helper()
+	files := map[string]fileInfo{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files[rel] = fileInfo{size: info.Size(), modTime: info.ModTime()}
+		return nil
+	})
+	require.NoError(t, err)
+	return files
 }
 
 // TestRunColdFromPack is the end-to-end cold path: fabricate a full chunk's
@@ -216,6 +284,72 @@ func TestRunColdMultiChunk(t *testing.T) {
 		assert.FileExists(t, layout.TxHashBinPath(c))
 	}
 	assert.FileExists(t, txhashIndexPath(t, layout, chunk.ID(0), chunk.ID(1)))
+
+	// The frontier hot chunk is end + 1, and it is the only ready hot chunk.
+	cat := openKeptCatalog(t, outRoot)
+	state, err := cat.HotState(chunk.ID(2))
+	require.NoError(t, err)
+	assert.Equal(t, geometry.HotReady, state)
+	ready, err := cat.ReadyHotChunkKeys()
+	require.NoError(t, err)
+	assert.Equal(t, []chunk.ID{2}, ready)
+}
+
+// TestRunColdKeepsCatalog asserts that a cold run leaves a catalog with the
+// earliest-ledger pin, frozen chunks and a ready frontier hot chunk, and that
+// a read view opens over it.
+func TestRunColdKeepsCatalog(t *testing.T) {
+	chunkID := chunk.ID(0)
+	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, chunk.LedgersPerChunk)
+	outRoot := t.TempDir()
+
+	require.NoError(t, runCold(context.Background(), testLogger(), coldOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
+		StartChunk: chunkID,
+		NumChunks:  1,
+		Workers:    1,
+		ColdRoot:   outRoot,
+		OutDir:     filepath.Join(t.TempDir(), "csv"),
+	}))
+
+	cat := openKeptCatalog(t, outRoot)
+	earliest, pinned, err := cat.EarliestLedger()
+	require.NoError(t, err)
+	require.True(t, pinned)
+	assert.Equal(t, chunkID.FirstLedger(), earliest)
+	state, err := cat.State(chunkID, geometry.KindLedgers)
+	require.NoError(t, err)
+	assert.Equal(t, geometry.StateFrozen, state)
+	hotState, err := cat.HotState(chunkID + 1)
+	require.NoError(t, err)
+	assert.Equal(t, geometry.HotReady, hotState)
+	assert.DirExists(t, geometry.NewLayout(outRoot).HotChunkPath(chunkID+1))
+
+	readViewOn(t, cat, chunkID.LastLedger())
+}
+
+// TestRunColdRefusesExistingDataset asserts that a second cold run into the
+// same root fails before it writes a file.
+func TestRunColdRefusesExistingDataset(t *testing.T) {
+	chunkID := chunk.ID(0)
+	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, chunk.LedgersPerChunk)
+	outRoot := t.TempDir()
+	opts := coldOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
+		StartChunk: chunkID,
+		NumChunks:  1,
+		Workers:    1,
+		ColdRoot:   outRoot,
+		OutDir:     filepath.Join(t.TempDir(), "csv"),
+	}
+	require.NoError(t, runCold(context.Background(), testLogger(), opts))
+	before := fileSet(t, outRoot)
+
+	opts.OutDir = filepath.Join(t.TempDir(), "csv2")
+	err := runCold(context.Background(), testLogger(), opts)
+	require.ErrorIs(t, err, errDatasetExists)
+	assert.Equal(t, before, fileSet(t, outRoot))
+	require.NoDirExists(t, opts.OutDir)
 }
 
 // TestRunColdRefusesInPlaceRepack asserts the source/destination collision
@@ -234,7 +368,7 @@ func TestRunColdRefusesInPlaceRepack(t *testing.T) {
 }
 
 // TestBenchRejectsInvalidSourceEarly asserts a bad --source invocation fails in
-// validate(), before either driver creates its output or scratch directories.
+// validate(), before either driver creates its output or dataset directories.
 func TestBenchRejectsInvalidSourceEarly(t *testing.T) {
 	base := t.TempDir()
 	coldRoot := filepath.Join(base, "cold")
@@ -298,9 +432,9 @@ func TestPackBackendMultiChunkRange(t *testing.T) {
 	}
 }
 
-// TestRunHotFromPack is the end-to-end hot path: a capped run over a fixture
-// pack through the production ingestion loop into a fresh hot RocksDB,
-// checking the per-phase report and the fixed-starting-state semantics.
+// TestRunHotFromPack is the end-to-end hot path: a capped run over a test
+// dataset pack through the production ingestion loop into a fresh hot RocksDB,
+// checking the per-phase report.
 func TestRunHotFromPack(t *testing.T) {
 	const numLedgers = 200
 	chunkID := chunk.ID(0)
@@ -308,15 +442,14 @@ func TestRunHotFromPack(t *testing.T) {
 	hotRoot := t.TempDir()
 	csvDir := filepath.Join(t.TempDir(), "csv")
 
-	opts := hotOptions{
+	require.NoError(t, runHot(context.Background(), testLogger(), hotOptions{
 		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
 		StartChunk: chunkID,
 		NumChunks:  1,
 		NumLedgers: numLedgers,
 		HotRoot:    hotRoot,
 		OutDir:     csvDir,
-	}
-	require.NoError(t, runHot(context.Background(), testLogger(), opts))
+	}))
 
 	// The commit phase (WAL append + fsync) is far above timer granularity,
 	// so every ledger contributes a sample; extract likewise.
@@ -348,10 +481,88 @@ func TestRunHotFromPack(t *testing.T) {
 		assert.EqualValues(t, 1, driver["peak_rss_bytes"]["n"])
 		assert.Positive(t, driver["peak_rss_bytes"]["total_ns"])
 	}
+}
 
-	// A second run against the same hot root succeeds from a fixed (empty)
-	// starting state: the production create bracket wipes the leftover DB.
+// TestRunHotKeepsCatalog asserts that a hot run leaves a catalog with the
+// earliest-ledger pin and a ready hot chunk, and that a read view opens over
+// it.
+func TestRunHotKeepsCatalog(t *testing.T) {
+	const numLedgers = 200
+	chunkID := chunk.ID(0)
+	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, numLedgers)
+	hotRoot := t.TempDir()
+
+	require.NoError(t, runHot(context.Background(), testLogger(), hotOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
+		StartChunk: chunkID,
+		NumChunks:  1,
+		NumLedgers: numLedgers,
+		HotRoot:    hotRoot,
+		OutDir:     filepath.Join(t.TempDir(), "csv"),
+	}))
+
+	cat := openKeptCatalog(t, hotRoot)
+	earliest, pinned, err := cat.EarliestLedger()
+	require.NoError(t, err)
+	require.True(t, pinned)
+	first := chunkID.FirstLedger()
+	assert.Equal(t, first, earliest)
+	state, err := cat.HotState(chunkID)
+	require.NoError(t, err)
+	assert.Equal(t, geometry.HotReady, state)
+
+	readViewOn(t, cat, first+numLedgers-1)
+}
+
+// TestRunHotRefusesExistingDataset asserts that a second hot run into the same
+// root fails before it writes a file.
+func TestRunHotRefusesExistingDataset(t *testing.T) {
+	const numLedgers = 200
+	chunkID := chunk.ID(0)
+	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, numLedgers)
+	hotRoot := t.TempDir()
+	opts := hotOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
+		StartChunk: chunkID,
+		NumChunks:  1,
+		NumLedgers: numLedgers,
+		HotRoot:    hotRoot,
+		OutDir:     filepath.Join(t.TempDir(), "csv"),
+	}
 	require.NoError(t, runHot(context.Background(), testLogger(), opts))
+	before := fileSet(t, hotRoot)
+
+	opts.OutDir = filepath.Join(t.TempDir(), "csv2")
+	err := runHot(context.Background(), testLogger(), opts)
+	require.ErrorIs(t, err, errDatasetExists)
+	assert.Equal(t, before, fileSet(t, hotRoot))
+	require.NoDirExists(t, opts.OutDir)
+}
+
+// TestRunHotRefusesColdDataset asserts that a hot run into a cold dataset root
+// fails.
+func TestRunHotRefusesColdDataset(t *testing.T) {
+	chunkID := chunk.ID(0)
+	packDir, _ := writeSourcePack(t, t.TempDir(), chunkID, chunk.LedgersPerChunk)
+	root := t.TempDir()
+	require.NoError(t, runCold(context.Background(), testLogger(), coldOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
+		StartChunk: chunkID,
+		NumChunks:  1,
+		Workers:    1,
+		ColdRoot:   root,
+		OutDir:     filepath.Join(t.TempDir(), "csv"),
+	}))
+
+	err := runHot(context.Background(), testLogger(), hotOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
+		StartChunk: chunkID,
+		NumChunks:  1,
+		NumLedgers: 200,
+		HotRoot:    root,
+		OutDir:     filepath.Join(t.TempDir(), "csv2"),
+	})
+	require.ErrorIs(t, err, errDatasetExists)
 }
 
 // TestRunHotIncompleteStream asserts an undersized source is a hard error, not

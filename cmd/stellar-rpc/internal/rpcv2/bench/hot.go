@@ -35,16 +35,11 @@ type hotOptions struct {
 	// cap below one chunk never reaches a boundary.
 	NumLedgers uint32
 
-	// HotRoot is the scratch root the hot RocksDBs are created under, at
-	// geometry.NewLayout(HotRoot).HotChunkPath(chunk). Each chunk's DB is
-	// opened through the production create bracket, which wipes any leftover
-	// dir, so every run starts from an empty DB (hot timings are only
+	// HotRoot is the dataset root, laid out by geometry.NewLayout: the catalog
+	// and the hot RocksDBs at HotChunkPath(chunk). It must not already hold a
+	// catalog, so every run starts from empty DBs (hot timings are only
 	// comparable from a fixed starting state).
 	HotRoot string
-
-	// CatalogDir is the base dir the run-scoped scratch catalog is created
-	// under. Empty means HotRoot.
-	CatalogDir string
 
 	// CloseInterval is the assumed time between ledger closes. When positive,
 	// the run gives each ledger a due time interval apart and waits out the
@@ -81,11 +76,11 @@ func (o hotOptions) validate() error {
 }
 
 // runHot benchmarks the hot path: the daemon's ingestion loop (via
-// rpcv2.RunBoundedIngestionLoop) over the range's ledgers, into fresh hot
-// DBs opened through a scratch catalog. A no-op boundary discards completed
-// chunks so no cold-path freeze runs, isolating the hot measurement. The sink
-// collects the loop's per-phase HotPhase timings; on success runHot records the
-// whole-run wall-clock and writes the CSV report.
+// rpcv2.RunBoundedIngestionLoop) over the range's ledgers into a new dataset
+// whose catalog pins the earliest ledger to the range's first ledger. A no-op
+// boundary discards completed chunks so no cold-path freeze runs, isolating the
+// hot measurement. The sink collects the loop's per-phase HotPhase timings; on
+// success runHot records the whole-run wall-clock and writes the CSV report.
 //
 // With --close-interval (opts.CloseInterval) set, the source is paced to that
 // close cadence: the run measures steady-state keep-up rather than catch-up
@@ -94,24 +89,23 @@ func runHot(ctx context.Context, logger *supportlog.Entry, opts hotOptions) erro
 	if err := opts.validate(); err != nil {
 		return err
 	}
+	layout := geometry.NewLayout(opts.HotRoot)
+	if err := checkNoCatalog(layout); err != nil {
+		return err
+	}
 	// Surface an unwritable --out before the expensive run, not after it.
 	if err := os.MkdirAll(opts.OutDir, 0o755); err != nil {
 		return fmt.Errorf("create --out dir %s: %w", opts.OutDir, err)
 	}
-	layout := geometry.NewLayout(opts.HotRoot)
 	// Create + fsync the hot root up front — the daemon's own root prep.
 	if err := config.PrepareRoots(layout.HotRoot()); err != nil {
 		return fmt.Errorf("prepare --hot-dir hot root: %w", err)
 	}
-	catalogBase := opts.CatalogDir
-	if catalogBase == "" {
-		catalogBase = opts.HotRoot
-	}
-	cat, releaseCat, err := openScratchCatalog(catalogBase, layout, logger)
+	cat, err := createDatasetCatalog(layout, opts.StartChunk, logger)
 	if err != nil {
 		return err
 	}
-	defer releaseCat()
+	defer cat.Close()
 
 	backend, release, err := openSource(ctx, opts.Source)
 	if err != nil {
