@@ -4,7 +4,7 @@
 |---|---|
 | Branch | `bench-campaign-v2/12-freeze` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
-| Depends on | PR 02 (kept catalog, pinned earliest ledger), PR 03 (`results.json` writer). PR 01 only for the `fileset` test helper. D23, D33 (the runner runs the freeze after the hot load step) and D37 (the range, the second-freeze error), all confirmed. |
+| Depends on | PR 02 (kept catalog, pinned earliest ledger), PR 03 (`results.json` writer). D23, D33 (the runner runs the freeze after the hot load step) and D37 (the range, the second-freeze error), all confirmed. |
 | Implements | D23, D37; spec Section 6.8, Section 7.2 rule 9 (`freeze` keys); requirement R1 "freezing" (requirements evaluation) |
 | Estimate | About 170 non-test lines: `bench/freeze.go` 100, `bench/cold.go` 35 (shared driver), `bench/command.go` 35 |
 
@@ -129,7 +129,7 @@ Test dataset: `runHot` over a pack tree from `writeSourcePack` (`bench_test.go`)
 |---|---|---|---|
 | `TestRunFreezeWritesResults` | `bench`, `freeze_test.go` | Spec: a freeze over a kept hot test dataset writes `results.json`. | `runFreeze(ctx, testLogger(), freezeOptions{Dataset: root, Workers: 2, OutDir: out})`; `readResults` (PR 03 helper): `command == "freeze"`, `status == "ok"`, `parameters.startChunk == 0`, `numChunks == 1`, `readyHotChunks == 2`, `driver.backfill_wall.count == 1`, `driver.ledgers_total.items == 10000`. |
 | `TestRunFreezeResolvesCold` | same | Spec: after the freeze, `query.NewReadView` resolves the frozen chunks to cold. | Open the catalog; `query.NewRegistry(cat, rpcv2test.RetentionFor(t, cat, 0))`; publish no handle; `SetLatestLedger(chunk.ID(0).LastLedger(), query.UnknownCloseTime())`; `view.WithLedger(seq, fn)` succeeds for the first and last ledger of chunk 0. With no hot handle, a hot-routed read returns `ErrUnavailable`, so success proves the cold route. `cat.State(0, KindEvents) == frozen`. |
-| `TestRunFreezeLeavesHotUnchanged` | same | The freeze does not change the hot databases. | `fileset.Take(t, layout.HotRoot())` before and `RequireUnchanged` after (PR 01 helper). |
+| `TestRunFreezeLeavesHotUnchanged` | same | The freeze does not change the hot databases. Walk `layout.HotRoot()` with `filepath.WalkDir` before and after, inside the test, and compare the relative path, size and modification time of each file. |
 | `TestRunFreezeRefusesSecondRun` | same | A second freeze returns `errAlreadyFrozen` and times nothing. | Run twice. |
 | `TestRunFreezeRequiresCatalog` | same | A missing catalog fails and creates nothing. | `Dataset: t.TempDir()`; error; `NoDirExists(layout.CatalogPath())`. |
 | `TestCompleteHotRange` | same | The range stops at the first incomplete chunk and fails when the first is incomplete. | Case 1: `keptHotDataset` gives `[0, 0]`. Case 2: `runHot` with 50 ledgers of chunk 0 gives an error. Do not use `rpcv2test.SeedHotChunkSeq` here: it keeps its read-write handle open until cleanup, and a read-only open beside a writer is undefined behaviour. |

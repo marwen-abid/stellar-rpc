@@ -5,8 +5,8 @@
 | Branch | `bench-campaign-v2/08-box` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
 | Depends on | PR 07 (`bench-campaign run`, `campaign.json` updates), Q2 (secret store, IAM grant). B2 must land before the first run with `publish=yes`. |
-| Implements | D16, D17, D31; spec Sections 4, 6.6, 7.1 |
-| Estimate | about 540 non-test lines: `box-bootstrap.sh` 105, `user-data-stub.sh` 45, `render-user-data.sh` 40, `run-box.sh` 175, `slack-payload.sh` 75, `slack-campaign.jq` 70, `post-slack.sh` 29 |
+| Implements | D16, D17, D31, D38 (XFS with reflink); spec Sections 4, 6.2, 6.6, 7.1 |
+| Estimate | about 550 non-test lines: `box-bootstrap.sh` 115, `user-data-stub.sh` 45, `render-user-data.sh` 40, `run-box.sh` 175, `slack-payload.sh` 75, `slack-campaign.jq` 70, `post-slack.sh` 29 |
 
 `PE` = `cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval`; `BC` = `PE/bench-campaign`.
 
@@ -79,12 +79,23 @@ its ceiling.
 
 Keep, in this order: instance-store discovery by `lsblk -dno NAME,MODEL`
 model `Instance Storage` (one disk, else exit 1; `NVME_DEV` override); the
-model check; `mkfs.ext4 -m0` when `blkid` finds no filesystem; `mount -o
-noatime` at `MOUNT` (default `/mnt/nvme`); `mkdir -p $MOUNT/bench`; the fsync
-probe (`dd ... oflag=dsync`, fail on `GB/s`, `FSYNC_PROBE_WARN_ONLY=1`);
+model check; `mkfs.xfs -m reflink=1` when `blkid` finds no filesystem (D38;
+this replaces the `mkfs.ext4 -m0` of the benchmarks script); `mount -o
+noatime` at `MOUNT` (default `/mnt/nvme`); `mkdir -p $MOUNT/bench`; the
+reflink check; the fsync probe (`dd ... oflag=dsync`, fail on `GB/s`, `FSYNC_PROBE_WARN_ONLY=1`);
 apt packages `build-essential curl git jq pkg-config cmake ninja-build unzip
 libsnappy-dev liblz4-dev zlib1g-dev`; the AWS CLI check; Go `go1.26.5` at
 `/usr/local/go`; Rust `1.92.0` by rustup; zstd and RocksDB.
+
+`mkfs.xfs` is in `xfsprogs`. When `command -v mkfs.xfs` finds nothing, the
+bootstrap installs `xfsprogs` with apt before it formats the disk.
+
+Reflink check (D38, spec 6.2): after the mount, write a 1 MB file under
+`$MOUNT/bench` and run `cp --reflink=always` on it. If `cp` fails, exit 1 with
+"`$MOUNT` does not support reflink copies". An existing filesystem (a
+re-run) gets the same check, so an ext4 volume fails here. Delete both files.
+With `REFLINK_CHECK_WARN_ONLY=1`, log a warning and go on; the load step then
+makes plain copies (PR 10).
 
 Drop: `sudo`, `tmux`, gcloud, the `golden,scratch,hot,results` directories,
 the `$BENCH_ROOT/src` clone and the `.bashrc` block. Write `/root/box-env.sh`
@@ -191,7 +202,7 @@ Keep the block limits from #17 (header 150, section 3000, field 2000).
 
 | File | Change | What | Lines |
 |---|---|---|---|
-| `BC/box-bootstrap.sh` | new | Port of benchmarks `runner/bootstrap.sh` | 105 |
+| `BC/box-bootstrap.sh` | new | Port of benchmarks `runner/bootstrap.sh`, XFS with reflink, the reflink check | 115 |
 | `BC/user-data-stub.sh` | new | Ceiling, log, clone, exec | 45 |
 | `BC/render-user-data.sh` | new (from #16) | Preamble + stub, gzip, 16 KB check | 40 |
 | `BC/run-box.sh` | new | Runner, uploads, crash, finish | 175 |
@@ -215,7 +226,9 @@ script's text (spec Section 11 rule 9).
 | `test_stub_sets_ceiling_first` | `test_user_data.py` | Ceiling before any other command | Run the rendered file with stubs for `shutdown`, `apt-get`, `git`, `aws`, `logger`, `bash` target; `calls()[0]` is `shutdown -P +N`. |
 | `test_stub_gets_campaign_from_s3` | `test_user_data.py` | `aws s3 cp` of `results/<id>/campaign.json` comes before the `git` fetch | Same stubs; check the order in `calls()`. |
 | `test_stub_clone_failure_powers_off` | `test_user_data.py` | Early failure: log upload, `poweroff` | `git` stub exits 1; also `aws s3 cp` of `campaign.json` exits 1. |
-| `test_bootstrap_refuses_non_instance_store`, `test_bootstrap_fsync_probe`, `test_bootstrap_skips_mkfs_and_mount` | `test_bootstrap.py` | Model check; `GB/s` fails unless `FSYNC_PROBE_WARN_ONLY=1`; idempotent re-run | Stubs `lsblk`, `dd`, `blkid`, `mountpoint`, `mkfs.ext4`, `mount`; `MOUNT` = temp dir. |
+| `test_bootstrap_refuses_non_instance_store`, `test_bootstrap_fsync_probe`, `test_bootstrap_skips_mkfs_and_mount` | `test_bootstrap.py` | Model check; `GB/s` fails unless `FSYNC_PROBE_WARN_ONLY=1`; idempotent re-run | Stubs `lsblk`, `dd`, `blkid`, `mountpoint`, `mkfs.xfs`, `mount`; `MOUNT` = temp dir. |
+| `test_bootstrap_formats_xfs_with_reflink` | `test_bootstrap.py` | A disk with no filesystem gets `mkfs.xfs -m reflink=1` | `blkid` stub exits 2; `calls()` has `mkfs.xfs -m reflink=1 /dev/<disk>`. |
+| `test_bootstrap_reflink_check` | `test_bootstrap.py` | A failed `cp --reflink=always` exits 1, unless `REFLINK_CHECK_WARN_ONLY=1` | `cp` stub that exits 1 for `--reflink=always`. |
 | `test_finish_order_success` | `test_box.py` | S3, push, Slack, box log, `poweroff`, in order | Fake `bench-campaign` writes two `ok` steps; assert the order in `calls()`. |
 | `test_step_uploaded_before_exit` | `test_box.py` | Per-step upload | Fake runner writes step 1 `ok`, sleeps 3 s; `WATCH_SECONDS=1`; the `aws s3 cp` of step 1 comes before the runner exits. |
 | `test_runner_crash_marks_crashed` | `test_box.py` | `running` becomes `crashed`; box still finishes | Fake runner leaves a step `running`, exits 137. Check the uploaded `campaign.json` and the Slack payload. |
@@ -247,8 +260,9 @@ script's text (spec Section 11 rule 9).
 ## 9. Risks and open points
 
 - Q2 blocks the first EC2 run: it needs the store and the IAM grant.
-- Size: 540 lines. Over 600, split into 08a `box-bootstrap` (bootstrap, stub,
-  render; about 190) and 08b `box-finish` (`run-box.sh`, Slack; about 350).
+- The fsync probe and the ingest timings of earlier campaigns ran on ext4. XFS can change the ingest numbers. Record the filesystem in the first campaign's notes and compare it with an earlier ext4 campaign.
+- Size: 550 lines. Over 600, split into 08a `box-bootstrap` (bootstrap, stub,
+  render; about 200) and 08b `box-finish` (`run-box.sh`, Slack; about 350).
 - `PE/bootstrap-common.sh` keeps `upload_result` and `RESULT_KEY`, because
   `ec2-leg.yml` and `load-test-coordinator.yml` use them (spec Section 9).
 - `bench-serve.log` in a load step directory is pushed. Check its size;

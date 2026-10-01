@@ -25,7 +25,7 @@ After this PR, `bench-ingest cold` and `bench-ingest hot` leave a catalog at `<d
 ## 3. Out of scope (boundaries)
 
 - `results.json`, `--paced-ledgers`: PR 03.
-- The read-only opens (`catalog.OpenReadOnly`, `hotchunk.OpenReadOnlyWithEvents`): PR 01. This PR's tests open the kept catalog with `catalog.Open`. If PR 01 has merged, use `catalog.OpenReadOnly` in the tests.
+- The dataset clone that `bench-serve` serves (D38): PR 05 and PR 10. This PR's tests open the kept catalog with `catalog.Open`.
 - `bench-serve` and its start sequence: PR 05.
 - `bench-ingest freeze`: PR 12.
 - A `dataset.json` manifest: rejected by D20. The catalog holds no passphrase, range or tier.
@@ -127,7 +127,7 @@ All tests use the existing helpers in `P/bench/bench_test.go`: `writeSourcePack`
 `readViewOn` does what `bench-serve` will do (PR 05), with the calls the facts name (A2, A3, A4):
 
 1. `reg := query.NewRegistry(cat, rpcv2test.RetentionFor(t, cat, 0))`. `RetentionFor` reads `config:earliest_ledger`, so a missing pin gives chunk 0 and `SeedCloseTimes` fails ("oldest ledger ... missing").
-2. For each `c` in `cat.ReadyHotChunkKeys()`: `db, _ := hotchunk.OpenReadyView(geometry.HotReady, cat.Layout().HotChunkPath(c), c, testLogger())`; `reg.PublishHandle(c, db)`; close on cleanup. (With PR 01 merged, use `hotchunk.OpenReadOnlyWithEvents`.)
+2. For each `c` in `cat.ReadyHotChunkKeys()`: `db, _ := hotchunk.OpenReadyView(geometry.HotReady, cat.Layout().HotChunkPath(c), c, testLogger())`; `reg.PublishHandle(c, db)`; close on cleanup.
 3. `reg.SetLatestLedger(latest, query.UnknownCloseTime())`. Without it the latest ledger is 0 and `SeedCloseTimes` does nothing.
 4. `view, err := reg.NewReadView()`; `require.NoError`; `view.Release()`.
 5. `require.NoError(t, adapters.SeedCloseTimes(reg))`. This reads the oldest and the latest ledger, so it proves the retention window and the latest ledger are right.
@@ -137,7 +137,7 @@ All tests use the existing helpers in `P/bench/bench_test.go`: `writeSourcePack`
 | `TestRunColdKeepsCatalog` | `bench`, `bench_test.go` | A cold run leaves a catalog with the pin, frozen chunks and a ready frontier; `NewReadView` succeeds. | `writeSourcePack` for chunk 0 (10,000 ledgers); `runCold`; `openKeptCatalog`; assert `EarliestLedger() == chunk.ID(0).FirstLedger()`, `State(0, KindLedgers) == frozen`, `HotState(1) == ready`, `DirExists(layout.HotChunkPath(1))`; `readViewOn(t, cat, chunk.ID(0).LastLedger())`. |
 | `TestRunColdMultiChunk` (existing, extend) | same | The frontier is end + 1 for two chunks. | Add `HotState(2) == ready` and `ReadyHotChunkKeys() == [2]`. |
 | `TestRunHotKeepsCatalog` | same | A hot run leaves a catalog with the pin and ready chunks; `NewReadView` succeeds. | `writeSourcePack` 200 ledgers; `runHot` with `NumLedgers: 200`; `HotState(0) == ready`; `readViewOn(t, cat, first+199)`. |
-| `TestRunColdRefusesExistingDataset` | same | A second run fails with `errDatasetExists` and writes no file. | Run once. Take the file set of the root (with `fileset.Take` from PR 01 if merged, else a 15-line `filepath.WalkDir` helper in the test file). Run again with a new `OutDir`. `errors.Is(err, errDatasetExists)`; file set unchanged; `NoDirExists(newOut)`. |
+| `TestRunColdRefusesExistingDataset` | same | A second run fails with `errDatasetExists` and writes no file. | Run once. Take the file set of the root with a 15-line `filepath.WalkDir` helper in the test file. Run again with a new `OutDir`. `errors.Is(err, errDatasetExists)`; file set unchanged; `NoDirExists(newOut)`. |
 | `TestRunHotRefusesExistingDataset` | same | Same for hot. Replaces the last line of `TestRunHotFromPack`, which today asserts that a second run succeeds. | Same pattern. |
 | `TestRunHotRefusesColdDataset` | same | D14: a hot run into a cold root fails. | `runCold` then `runHot` on the same root; `errDatasetExists`. |
 | `TestBenchRejectsInvalidSourceEarly` (existing) | same | Validation still runs before any directory is created. | No change. |
@@ -173,6 +173,6 @@ Manual check: build the v2 binary, run `bench-ingest cold` over a small pack tre
 - A failed run leaves a partial dataset with a catalog. A rerun into the same root fails. This is intended; the error text says to use a new root.
 - The frontier creation takes a few milliseconds (an empty RocksDB open and close, plus two fsyncs). It is outside `backfill_wall` and outside the total wall log line.
 - `TestRunHotFromPack` asserts today that a second run into the same root succeeds. This PR inverts that behaviour. Move the assertion into `TestRunHotRefusesExistingDataset`.
-- The cold dataset now has a `hot/` directory. PR 05 must open it (it is `ready`) and PR 05's file-set test covers it.
+- The cold dataset now has a `hot/` directory. PR 05 must open it (it is `ready`), and the clone of the dataset includes it (D38).
 - The review digest (R1) placed this work in "PR 3"; the spec now numbers it PR 02. No other change.
 - No new decision is needed if the design above holds. If the reviewer keeps `--catalog-dir`, record it as a new decision with the reason.

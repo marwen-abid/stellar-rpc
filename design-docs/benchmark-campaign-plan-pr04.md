@@ -4,7 +4,7 @@
 |---|---|
 | Branch | `bench-campaign-v2/04-storage-metrics` |
 | Repository | marwen-abid/stellar-rpc (base `feature/full-history` at `91f158b` or later) |
-| Depends on | Nothing. It can go in parallel with PRs 01, 02, 03 and 06. |
+| Depends on | Nothing. It can go in parallel with PRs 02, 03 and 06. |
 | Implements | D6 (amended), D35; spec Section 6.4, spec Section 10.1 row 04 |
 | Estimate | About 370 non-test lines: `query/read_timing.go` 170, `query/registry.go` 35, `query/resolve.go` 25, `query/tx_lookup.go` 25, `stores/ledger/cold_reader.go` 12, `stores/event/cold_reader.go` 18, `observability/read_metrics.go` 60, `jsonrpc.go` 12, `daemon.go` 10. Docs are not counted. |
 

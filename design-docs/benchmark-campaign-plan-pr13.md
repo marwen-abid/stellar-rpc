@@ -26,8 +26,8 @@ PR 13 delivers the command and a local test only. Campaign use needs a new PR af
 ## 3. Out of scope (boundaries)
 
 - Campaign use (a runner step, `load.json` fields, Blaster flags): a new PR after PR 10 and PR 13 (D25, spec 1.1).
-- Ingestion inside `bench-serve`: rejected by D25. `bench-serve` stays read-only (D5).
-- `bench-ingest hot` and `bench-serve` on one dataset at the same time: rejected by D25 (RocksDB read-only beside a writer is undefined).
+- Ingestion inside `bench-serve`: rejected by D25. `bench-serve` serves a clone of a finished dataset and does not ingest (D38).
+- `bench-ingest hot` and `bench-serve` on one dataset at the same time: rejected by D25 (two processes cannot share a live RocksDB database).
 - A BSB or captive-core source for `bench-live`: not needed now (requirements-eval R4/R5).
 - Storage metrics: PR 04. `bench-live` exposes them when PR 04 is merged, with no extra code.
 

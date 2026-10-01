@@ -6,7 +6,7 @@
 | Base | `feature/full-history` at `91f158b` (upstream; the fork was fast-forwarded to it on 2026-09-30) |
 | Replaces | [marwen-abid/stellar-rpc#12](https://github.com/marwen-abid/stellar-rpc/pull/12) to [marwen-abid/stellar-rpc#20](https://github.com/marwen-abid/stellar-rpc/pull/20) |
 | Decisions | [benchmark-campaign-decisions.md](./benchmark-campaign-decisions.md) |
-| Plans | `benchmark-campaign-plan-<id>.md`, one file for each row of Section 10 (`pr01` to `pr13`, `b1` to `b4`) |
+| Plans | `benchmark-campaign-plan-<id>.md`, one file for each row of Section 10 (`pr02` to `pr13`, `b1` to `b4`) |
 | Overview | [RPCv2 Benchmark Campaigns](https://claude.ai/artifact/RWRgf15Ka54ySAzBAHB6k1) (one-page summary) |
 | Related | [stellar-rpc-benchmarks](https://github.com/stellar-experimental/stellar-rpc-benchmarks), [stellar-rpc-blaster](https://github.com/stellar/stellar-rpc-blaster) (branch `dev`) |
 
@@ -67,6 +67,7 @@ affected. The defined term "paced ledgers" can use that root.
 | Dataset profile | A synthetic ledger workload, for example `sac-6000`: SAC transfers, 6,000 transactions per ledger. |
 | Bench root | The directory of all datasets and packs on one machine: `/mnt/nvme/bench` on a box (`run --root`). |
 | Dataset | The directory that one `bench-ingest` step writes: data files and a catalog. Written `<dataset>` below. A test dataset is one that a Go test builds. |
+| Clone | A copy of a dataset that `bench-serve` serves (D38). Written `<clone>` below. The runner makes it before `bench-serve` starts and deletes it after. |
 | Catalog | A RocksDB database at `<dataset>/catalog/rocksdb`. It records the chunks and their state. The read path uses it to route each request. |
 | Chunk | A block of 10,000 ledgers. Chunk `c` starts at ledger `c × 10000 + 2`. |
 | Tier | **Hot**: a chunk in its own RocksDB database (a hot chunk database), not yet converted to cold files. **Cold**: a chunk converted to read-only files. |
@@ -167,30 +168,52 @@ For each profile, the same Go table holds `start_chunk` (1) and the chunk count
    `--source pack --pack-dir <bench root>/<profile>/packs`. The hot step always
    passes `--close-interval`.
 
-### 6.2 Read-only opens (D5, D36, PR 01)
+### 6.2 Dataset clone (D38, PR 05, PR 10)
 
-`bench-serve` must not change a dataset (D5).
+`bench-serve` serves a clone of a dataset, never the dataset itself (D38). It
+opens the clone read-write, as the daemon opens its stores, so the clone can
+change. Nothing opens the original, so it does not change.
 
-- Add `hotchunk.OpenReadOnlyWithEvents`: a read-only open with events.
-- Add `catalog.OpenReadOnly` over `rocksdb.Config.ReadOnly`. It checks the path
-  with `os.Stat` before it opens RocksDB, so it fails on a missing catalog. It
-  refuses a catalog without `meta/catalog-secret` (D36).
-- Remove the comments that say a read-only open is ledgers-only, in
-  `stores/hotchunk/hotchunk.go` and `query/resolve.go`.
-- A read-only open takes no LOCK. Never open a dataset read-only while a writer
-  has it open.
-- Test: open a hot chunk directory, read (events included) and close. The names,
-  sizes and modification times of its files do not change. PR 05 runs the same
-  check over a whole dataset for `bench-serve`.
+- **What.** The whole dataset directory: the catalog, the hot chunk databases
+  (the frontier chunk included) and the cold files.
+- **Where.** `<dataset>-clone`, next to the dataset, for example
+  `/mnt/nvme/bench/sac-6000/run1/cold-clone`. A reflink copy needs the same
+  filesystem.
+- **How.** A copy-on-write copy when the filesystem supports it:
+  `cp -r --reflink=always <dataset> <clone>` on XFS made with `reflink=1` (the
+  box, PR 08), `cp -c -R <dataset> <clone>` on APFS. It reads no file data and
+  takes less than a second. When the reflink copy fails, the runner makes a
+  plain copy (`cp -r`) and logs it. A plain copy takes 30 to 90 s on NVMe.
+- **When.** The cold load step makes a new clone before each Blaster run,
+  because `bench-serve` starts again for each run. The hot load step makes one
+  clone before `bench-serve` starts. The runner deletes each clone after the
+  `bench-serve` process that served it exits, and at the end of the step.
+  `load.json` records the clone time (`cloneSeconds`, Section 7.1).
+- **Check.** Before it opens anything, `bench-serve` checks with `os.Stat`
+  that `<clone>/catalog/rocksdb` exists. If it does not exist, `bench-serve`
+  exits with an error. `catalog.Open` creates a missing catalog, so without
+  this check a mistyped path gives an empty catalog.
+- **Local run.** `bench-serve` has no clone option. A person who runs
+  `bench-serve` by hand makes the clone first, serves it and deletes it:
+  ```
+  cp -r --reflink=auto <dataset> <dataset>-clone    # Linux; macOS: cp -c -R
+  stellar-rpc-v2 bench-serve --dataset <dataset>-clone ...
+  rm -rf <dataset>-clone
+  ```
+  `bench-campaign run` on a laptop makes the clone itself, as on the box.
+- A clone does not change the page cache of the original. We think that the
+  files of a clone start with no cached pages (check in PR 10). The cold load
+  step drops the page cache after it makes the clone (Section 6.7).
 
 ### 6.3 `bench-serve` (new, PR 05)
 
-`bench-serve` serves a dataset over JSON-RPC and does not ingest. The wiring is
+`bench-serve` serves a clone of a dataset (Section 6.2) over JSON-RPC and
+does not ingest. `--dataset` names the clone. The wiring is
 `rpcv2.ServeDataset(ctx, opts)`. The flags and the cobra command are in
 `rpcv2/bench` (D26).
 
 ```
-stellar-rpc-v2 bench-serve --dataset /mnt/nvme/bench/sac-6000/run1/cold \
+stellar-rpc-v2 bench-serve --dataset /mnt/nvme/bench/sac-6000/run1/cold-clone \
   --listen 127.0.0.1:8000 --admin-listen 127.0.0.1:8001 \
   --network-passphrase "<passphrase of the packs>"
 ```
@@ -198,17 +221,21 @@ stellar-rpc-v2 bench-serve --dataset /mnt/nvme/bench/sac-6000/run1/cold \
 Start sequence:
 
 1. Fail when `--network-passphrase` is empty (D20).
-2. Build the layout with `geometry.NewLayout(<dataset>)`. Open the catalog with
-   `catalog.OpenReadOnly`.
+2. Check with `os.Stat` that `<clone>/catalog/rocksdb` exists; else fail
+   (Section 6.2). Build the layout with `geometry.NewLayout(<clone>)`. Open the
+   catalog with `catalog.Open`.
 3. Build the retention range with size 0 and the chunk of
-   `config:earliest_ledger` as the earliest chunk.
+   `config:earliest_ledger` as the earliest chunk. Get the latest ledger with
+   `lastCommittedLedger`, as the daemon does (D3). Call it before item 5: it
+   opens the highest ready chunk read-only, and daemon startup also calls it
+   before any read-write open. On a cold dataset the empty frontier chunk
+   refines nothing, so the latest ledger is the last cold ledger.
 4. Assemble the registry with `query.NewRegistry`, not `query.OpenRegistry` (it
-   opens hot chunks read-write and gates `getHealth` on a first commit).
-5. Open each `ready` chunk with `hotchunk.OpenReadOnlyWithEvents` and call
-   `PublishHandle`.
-6. Get the latest ledger with `lastCommittedLedger`, as the daemon does (D3). On
-   a cold dataset the empty frontier chunk refines nothing, so it is the last
-   cold ledger. Call `SetLatestLedger` with it and `query.UnknownCloseTime()`.
+   gates `getHealth` on a first commit).
+5. Open each `ready` chunk with `hotchunk.OpenReadyWrite`, the open that
+   `query.OpenRegistry` uses in the daemon, and call `PublishHandle`.
+6. Call `SetLatestLedger` with the latest ledger of item 3 and
+   `query.UnknownCloseTime()`.
    Then call `adapters.SeedCloseTimes`. It reads the header of the latest
    ledger and calls `SetLatestLedger(latest, CloseTimeAt(...))` itself.
    `getHealth.oldestLedger` is the first ledger of the earliest chunk. On a cold
@@ -321,10 +348,11 @@ ceiling + 30 minutes.
 **Box bootstrap.** Port benchmarks `runner/bootstrap.sh` into
 `perf-eval/bench-campaign/box-bootstrap.sh` (`perf-eval` is
 `cmd/stellar-rpc/internal/rpcv1/integrationtest/infrastructure/perf-eval`). It
-mounts the instance store at `/mnt/nvme` (bench root `/mnt/nvme/bench`) and runs
-the fsync probe. It installs the apt packages, the AWS CLI, and Go and Rust at
-pinned versions. It sets `RUSTUP_TOOLCHAIN`, because `rust-toolchain.toml` says
-`stable`. It runs `scripts/install-zstd.sh` and `scripts/install-rocksdb.sh`
+formats the instance store as XFS with `mkfs.xfs -m reflink=1`, mounts it at
+`/mnt/nvme` (bench root `/mnt/nvme/bench`), checks that
+`cp --reflink=always` works on it (D38) and runs the fsync probe. It installs
+the apt packages, the AWS CLI, and Go and Rust at pinned versions. It sets
+`RUSTUP_TOOLCHAIN`, because `rust-toolchain.toml` says `stable`. It runs `scripts/install-zstd.sh` and `scripts/install-rocksdb.sh`
 from `ref`, so the native libraries match the grocksdb of `ref`.
 
 **User-data.** Before it starts the box, the workflow uploads `campaign.json` to
@@ -380,8 +408,9 @@ method (getTransaction, getEvents, getTransactions, getLedgers): 250 → 150, 50
 one level, its `rng_seed` and its own subdirectory `<level>rps/` (Q4). A load
 step runs these steps in this order:
 
-1. Start `bench-serve` on the dataset. Each start appends its stdout and stderr
-   to `<step dir>/bench-serve.log`.
+1. Make a clone of the dataset (Section 6.2) and record its time. Start
+   `bench-serve` on the clone. Each start appends its stdout and stderr to
+   `<step dir>/bench-serve.log`.
 2. Poll `getHealth` on `--listen` one time each second until it answers. Stop at
    30 minutes and fail the step.
 3. Take `<first>` and `<last>` from `oldestLedger` and `latestLedger` of that
@@ -395,10 +424,10 @@ step runs these steps in this order:
 5. Send one `getTransaction` for a hash from `seed.json`. If the answer is
    `NOT_FOUND`, the passphrase is wrong: fail the step (D20).
 6. For each Blaster run:
-   1. Cold dataset only: stop `bench-serve` (as in item 7) and run
-      `sync; echo 3 > /proc/sys/vm/drop_caches` (the box runs as root). Then
-      start and wait as in items 1 and 2. The hot dataset keeps the cache and
-      the running `bench-serve`.
+   1. Cold dataset only: stop `bench-serve` (as in item 7), delete its clone,
+      make a new clone and run `sync; echo 3 > /proc/sys/vm/drop_caches` (the
+      box runs as root). Then start and wait as in items 1 and 2. The hot
+      dataset keeps the cache, the clone and the running `bench-serve`.
    2. Write `<level>rps/blaster.toml`: `rng_seed` and one `[endpoints.<method>]`
       table with `rps` for each method.
    3. Save `/metrics` from `--admin-listen` to `metrics-before.txt`.
@@ -418,7 +447,8 @@ step runs these steps in this order:
       `<level>rps/cpu.pprof`.
    7. Save `/metrics` again to `metrics-after.txt`.
 7. Stop `bench-serve`: SIGTERM, then SIGKILL after 60 seconds. A non-zero exit
-   code fails the step.
+   code fails the step. Delete the clone. On a step failure, delete the clone
+   too.
 8. Write `load.json` (Section 7.1). For each Blaster run it records the page
    cache state, and the GOMAXPROCS and CPU time of both processes. Core pinning
    is Q8.
@@ -489,7 +519,7 @@ the benchmarks repository leaves out `logs/`.
   "blasterCommit": "aadc1a17595f418bc92758909aa15a860acea0e8",
   "startedAt": "2026-10-01T17:27:10Z", "finishedAt": "2026-10-01T17:41:30Z", "status": "ok", "error": "",
   "runs": [
-        {"loadLevelRps": 250, "rngSeed": 1, "pageCache": "dropped", "serveReadySeconds": 41.2, "benchServeExitCode": 0,
+        {"loadLevelRps": 250, "rngSeed": 1, "pageCache": "dropped", "cloneSeconds": 0.4, "serveReadySeconds": 41.2, "benchServeExitCode": 0,
      "cpu": {"benchServeGomaxprocs": 8, "blasterGomaxprocs": 8, "benchServeSeconds": 212.4, "blasterSeconds": 97.1},
      "startedAt": "2026-10-01T17:28:02Z", "finishedAt": "2026-10-01T17:29:03Z", "status": "ok", "error": ""}
   ]
@@ -497,10 +527,11 @@ the benchmarks repository leaves out `logs/`.
 ```
 
 `runs[].status` is `ok`, `failed` or `skipped`. `pageCache` is `dropped` or
-`kept`. `benchServeExitCode` is the exit code of the `bench-serve` process that
+`kept`. `cloneSeconds` is the time to make the clone that the run served
+(Section 6.2). `benchServeExitCode` is the exit code of the `bench-serve` process that
 served the run. On the hot tier `bench-serve` starts once and all runs share
-one process. So `serveReadySeconds` and `benchServeExitCode` have the same
-value in each run entry.
+one process and one clone. So `cloneSeconds`, `serveReadySeconds` and
+`benchServeExitCode` have the same value in each run entry.
 `<level>rps/blaster.toml` holds the rendered mix of the run.
 
 ### 7.2 `results.json` (bench commands)
@@ -532,8 +563,8 @@ paced ledgers take about 20,000 s, so the step takes 6 h 42 m. Rules:
    sizes and `count` for counts. `count` is defined for future rows; no
    `bench-ingest` row uses it today. The converter converts units. The integer
    rule applies to `results.json` measurements only. `campaign.json` and
-   `load.json` give seconds as floats (`seconds`, `serveReadySeconds`,
-   `benchServeSeconds`).
+   `load.json` give seconds as floats (`seconds`, `cloneSeconds`,
+   `serveReadySeconds`, `benchServeSeconds`).
 2. A measurement name is `<group>.<row>` (D34). The group is the CSV file stem:
    `driver`, `hot`, `ledgers`, `txhash` or `events`. The row is the CSV row name
    without a unit suffix: `driver.ingest_total`, `driver.peak_rss`
@@ -665,26 +696,27 @@ it too, so a removal must also change that workflow.
 ### 10.1 stellar-rpc
 
 Branches are `bench-campaign-v2/NN-<slug>`. PR 00 stays on `bench-read/00-spec`
-until Marwen renames it.
+until Marwen renames it. D38 dropped PR 01 (read-only opens): `bench-serve`
+serves a clone with the daemon's opens, so no storage package changes. The
+numbers of the other PRs stay.
 
 | PR | Branch slug | Content | Depends on | Done when |
 |---|---|---|---|---|
 | 00 | `spec` | This spec and the decision log. | — | The team agrees. |
-| 01 | `readonly-open` | `hotchunk.OpenReadOnlyWithEvents`, `catalog.OpenReadOnly`, removal of the ledgers-only comments (Section 6.2). | — | The file-set test passes on a hot chunk directory. `catalog.OpenReadOnly` fails on a missing catalog and writes no file. |
 | 02 | `ingest-catalog` | Keep the catalog at `<dataset>/catalog/rocksdb`, pin the earliest ledger, the frontier chunk in `cold`, the existence check, removal of `--catalog-dir` (Section 6.1 item 1). | — | A cold run and a hot run each leave a catalog. `query.NewReadView` succeeds on both catalogs. A second run into the same dataset fails and writes no file. |
 | 03 | `ingest-results` | `results.json` writer (temporary file and rename, `status`), schema README, `--paced-ledgers`. CSV kept. Section 6.1 items 2 to 3, and the README documents item 4 (runner flags built in PR 07). Section 7.2. | — | A cold run and a hot run each write a `results.json` that matches the README. A killed run leaves `status: running`. With `--paced-ledgers 100`, `driver.ingest_total` has 100 samples. |
 | 04 | `storage-metrics` | Storage metrics (Section 6.4). Documentation in `docs/MONITORING.md` and the metrics table of `docs/ARCHIVE-NODE-BETA-RUNBOOK.md`. | — | One request records one observation for each store and tier it used. A view with no method name records nothing. A microbenchmark gives the cost of one accumulate-and-observe pair. A test with a slow yield body shows no change in the store histogram. A cold `getEvents` page records a non-zero open observation. |
-| 05 | `bench-serve` | `rpcv2.ServeDataset`, the command, the method filter, the admin registry, the shared `--profile-rates` flag on `bench-ingest` and `bench-serve` (Sections 6.3, 6.9). | 01, 02 | A test calls each served method over HTTP on a cold and a hot test dataset. Other methods return -32601. The file-set test over the dataset passes. An empty `--network-passphrase` fails at start. On the cold test dataset, `getHealth.oldestLedger` equals the first ledger of `start_chunk` (check in PR 05, Section 6.3 item 6). |
+| 05 | `bench-serve` | `rpcv2.ServeDataset`, the `os.Stat` check of the clone, the command, the method filter, the admin registry, the shared `--profile-rates` flag on `bench-ingest` and `bench-serve` (Sections 6.2, 6.3, 6.9). | 02 | A test calls each served method over HTTP on a clone of a cold and of a hot test dataset. Other methods return -32601. A path without `catalog/rocksdb` fails and creates no file. An empty `--network-passphrase` fails at start. On the cold test dataset, `getHealth.oldestLedger` equals the first ledger of `start_chunk` (check in PR 05, Section 6.3 item 6). |
 | 06 | `campaign-plan` | `cmd/bench-campaign` `plan`, `validate`, `estimate`, `load.toml`, the `campaign.json` schema (Sections 6.5, 7.3). | — | `plan` writes a valid `campaign.json` for each close interval. `validate` rejects each bad input. A test checks the estimate against the formula. |
 | 07 | `campaign-run` | `run`: the pack fetch, the build of `ref`, the subcommand check, the ingest and freeze steps, the bundle, the step statuses, `steps[].datasetBytes` (Sections 4, 6.5, 7.1). | 03, 06 | A local end-to-end test on a pack tree of 2 chunks writes a valid bundle. A killed step leaves a valid `campaign.json`. |
 | 08 | `box` | Bootstrap port, user-data stub, box script with an S3 upload for each step, push to `bundle/<id>`, `slack-payload.sh` and `slack-campaign.jq` rewritten to read `campaign.json`, `poweroff`, script tests (Section 6.6). | 07, Q2 | The script tests pass. They cover a runner crash, an S3 failure, a push failure and a Slack failure, and check the finish order of Section 6.6. |
 | 09 | `workflow` | Inputs and checks, upload of `campaign.json`, launch of the box, the reaper, `slack-reaper.jq` and the reaper mode of `slack-payload.sh`, a CI job for the script tests (Python 3.11 or later, bash, jq), the nine inputs on the #922 stub on `main`, removal of the relay (Sections 5, 6.6, 9). | 08 | One campaign with `publish=no` runs on EC2, uploads to S3, posts to Slack and powers off. A manual reaper dispatch terminates a test box with a past deadline. CI runs the script tests. The first campaign records the size of each hot dataset. |
-| 10 | `load-step` | `bench-serve` lifecycle, cache drop, `blaster generate` and `blaster run` flags, the one-hash check, metrics dumps, `load.json`, the Blaster pin and build, the `profile = true` handling (Sections 6.7, 6.9). Decide Q3, Q4 and Q8 here. | 04, 05, 07 | One campaign writes `load.json`, `blaster.json` and both metrics dumps for a cold and a hot dataset. A test that kills `bench-serve` gives a failed step with the exit code. |
+| 10 | `load-step` | The dataset clone and its plain-copy fallback, `bench-serve` lifecycle, cache drop, `blaster generate` and `blaster run` flags, the one-hash check, metrics dumps, `load.json`, the Blaster pin and build, the `profile = true` handling (Sections 6.7, 6.9). Decide Q3, Q4 and Q8 here. | 04, 05, 07 | One campaign writes `load.json`, `blaster.json` and both metrics dumps for a cold and a hot dataset. A test that kills `bench-serve` gives a failed step with the exit code. |
 | 11 | `remove-csv` | Remove the CSV output of `bench-ingest`. | 03, B1 | `bench-ingest` writes no CSV file. The converter tests still pass. |
 | 12 | `freeze` | `bench-ingest freeze` (Section 6.8). | 02, 03 | A freeze over a kept hot test dataset writes `results.json`. After it, `query.NewReadView` resolves the frozen chunks to cold. |
 | 13 | `bench-live` | `bench-live` and the three `rpcv2.Options` fields (Section 6.10). | 05 | A local test ingests paced ledgers from a pack tree of 300 ledgers. At the same time an HTTP client gets each new transaction with `getTransaction`. |
 
-PRs 01, 02, 03, 04 and 06 can go in parallel. Start each PR from
+PRs 02, 03, 04 and 06 can go in parallel. Start each PR from
 `feature/full-history` at `91f158b` or later. Build and serve a dataset with the
 same `ref` (D27).
 
