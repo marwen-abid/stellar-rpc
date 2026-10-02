@@ -272,6 +272,10 @@ func runPacedLeg(
 	}
 
 	leg.wg.Wait()
+	if err == nil {
+		// A cancel while the last requests finish still ends the leg as canceled.
+		err = ctx.Err()
+	}
 	return leg.result(due(warmup), interval), err
 }
 

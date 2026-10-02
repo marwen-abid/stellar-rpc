@@ -17,57 +17,32 @@ import (
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/hotchunk"
 )
 
-// This file is the bench CSV reporter, in three layers: the report schema
-// (fileSpecs — which CSV files exist and their fixed row orders), recording
-// (csvSink, the ingest.MetricSink that stores every signal as a raw sample on
-// a (file, row) key), and reporting (aggregation into percentile rows, then
-// CSV/log rendering).
-
-// csvHeader is every report CSV's header row.
 const csvHeader = "stage,n,n_items,total_ns,p50_ns,p90_ns,p99_ns,max_ns"
 
-// CSV file basenames not named after a cold data type.
+// CSV file basenames not named after a data or query type.
 const (
-	fileHot    = "hot"    // hot.csv: per-phase rows
-	fileDriver = "driver" // driver.csv: per-chunk aggregate rows
+	fileHot    = "hot"
+	fileDriver = "driver"
 )
 
-// Driver-report row labels. run_wall is recorded by the hot bench driver
-// itself via observe; backfill_wall and index_rebuild arrive through the
-// observability.Metrics signals the backfill scheduler emits; ingest_total is
-// reconstructed in HotPhase from each ledger's phase burst; the rest arrive
-// through the MetricSink cold signals.
+// driver.csv row labels.
 const (
-	driverBackfillWall = "backfill_wall" // cold only: RunBackfill's whole plan-and-execute wall (Metrics.Freeze)
-	driverIndexRebuild = "index_rebuild" // cold only: one txhash index build incl. eager sweep (Metrics.Rebuild)
-	driverChunkTotal   = "chunk_total"   // ColdChunkTotal: per-chunk ColdService lifetime
-	driverTotalSuffix  = "_total"        // ColdIngest per data type: "<type>_total"
-	// cold only: the shared per-ledger ExtractLedgerTxParts walk (ColdExtract),
-	// ledger-scoped and belonging to no single data type, so it lands in
-	// driver.csv.
-	driverColdExtract = "cold_extract"
-	// hot only: per-ledger end-to-end ingest time, reconstructed as the sum of
-	// one ledger's HotPhase burst (per-phase percentiles can't be summed).
-	driverIngestTotal = "ingest_total"
-	driverRunWall     = "run_wall" // hot only: whole-run wall-clock, seen by the driver
-	// hot only, paced runs (--close-interval > 0): per-ledger lag behind the
-	// close schedule at commit. Its "duration" columns carry a lag time; a
-	// lag that grows across the run means the backlog is growing (see
-	// recordPaceLag).
-	driverPaceLag = "pace_lag"
-	// cold AND hot: the run's peak resident set size (VmHWM), recorded once
-	// at run end (see recordPeakRSS). Its "duration" columns carry BYTES, not
-	// nanoseconds: storing the byte count as a duration lets the row use the
-	// same CSV format as every other row.
+	driverBackfillWall = "backfill_wall" // cold: RunBackfill's plan-and-execute wall (Metrics.Freeze)
+	driverIndexRebuild = "index_rebuild" // cold: one txhash index build, including its eager sweep
+	driverChunkTotal   = "chunk_total"   // cold: per-chunk ColdService lifetime
+	driverTotalSuffix  = "_total"        // cold: "<type>_total", from ColdIngest
+	driverColdExtract  = "cold_extract"  // cold: the per-ledger ExtractLedgerTxParts walk, shared by all types
+	driverIngestTotal  = "ingest_total"  // hot: per-ledger sum of one HotPhase burst
+	driverRunWall      = "run_wall"      // hot: whole-run wall-clock
+	driverPaceLag      = "pace_lag"      // hot, paced runs: per-ledger lag behind the close schedule at commit
+	// The run's peak resident set size (VmHWM). Its duration columns carry
+	// bytes, not nanoseconds.
 	driverPeakRSS = "peak_rss_bytes"
 )
 
-// Cold data-type and stage report labels, fixing the file/row order of the cold
-// CSVs (see fileSpecs). They MUST equal the strings the ingest engine emits
-// through MetricSink (ColdIngest's data_type, IngestStage's data_type/stage) —
-// they set the report ORDER. A label that drifts from the engine's is not dropped:
-// withUnknown appends any unrecognized row after the known ones; it only loses
-// its curated position.
+// Cold data-type and stage labels. They must equal the strings the ingest
+// engine emits through MetricSink, because they set the report order. A label
+// that drifts is still reported, after the known ones (see withUnknown).
 const (
 	coldTypeLedgers = "ledgers"
 	coldTypeTxhash  = "txhash"
@@ -85,30 +60,11 @@ type fileSpec struct {
 	rowOrder []string
 }
 
-// fileSpecs is the bench-ingest report schema, in file emission order:
-//
-//   - one CSV per cold data type the ingest engine reports (ledgers.csv,
-//     txhash.csv, events.csv), one row per cold pipeline stage (term_index →
-//     write → finalize) as reported via MetricSink.IngestStage;
-//   - hot.csv, one row per hot ingest phase, in hotchunk.Phase order;
-//   - driver.csv, the run-level aggregates: the cold scheduler's backfill wall
-//     and per-index-build rebuild rows (observability.Metrics), the engine's
-//     ColdChunkTotal, one "<type>_total" row per cold data type (ColdIngest),
-//     the shared per-ledger cold extract walk (ColdExtract), the hot
-//     per-ledger end-to-end ingest_total (reconstructed from each ledger's
-//     phase burst in HotPhase), the hot bench's driver-observed run wall-clock,
-//     the paced hot run's per-ledger pace_lag, and — for both modes, wherever
-//     VmHWM is readable — the run's peak_rss_bytes.
-//
-// The driver row order groups by producer: the cold rows first, then the
-// hot-only rows (ingest_total, run_wall, pace_lag together), and finally
-// peak_rss_bytes, which both modes emit. A row that recorded nothing is
-// suppressed, so each mode's report carries only its own rows — and
-// peak_rss_bytes is absent where /proc is unavailable (macOS; see
-// recordPeakRSS).
-//
-// A label recorded outside this vocabulary is still reported: withUnknown
-// appends it after the known rows (or files), so nothing is silently dropped.
+// fileSpecs is the bench-ingest report schema: one CSV per cold data type with
+// one row per cold stage, hot.csv with one row per hotchunk.Phase, and
+// driver.csv. driver.csv lists the cold rows, then the hot rows, then
+// peak_rss_bytes, which both modes emit. A row with no samples is suppressed,
+// so each mode's report has only its own rows.
 //
 //nolint:gochecknoglobals // fixed report schema, read-only
 var fileSpecs = func() []fileSpec {
@@ -125,9 +81,6 @@ var fileSpecs = func() []fileSpec {
 	for _, dt := range coldTypes {
 		driverRows = append(driverRows, dt+driverTotalSuffix)
 	}
-	// cold_extract closes the cold rows; ingest_total, run_wall, and pace_lag
-	// keep the hot-only rows grouped after them; peak_rss_bytes comes last,
-	// emitted by both modes.
 	driverRows = append(driverRows, driverColdExtract,
 		driverIngestTotal, driverRunWall, driverPaceLag, driverPeakRSS)
 
@@ -143,45 +96,18 @@ var fileSpecs = func() []fileSpec {
 
 // querySpecs is the bench-query report schema for one run over types and
 // rates. Types must be distinct and so must rates, or the schema repeats a row
-// name. The external results converter recognizes only wall, _millirps, _lag
-// and _shed as driver leg rows; other driver rows are classified as setup.
-// Keep the driver schema fixed and put completion accounting in its own file.
-// The row contract is:
-//
-//   - Every CSV other than driver.csv and query-accounting.csv is one query
-//     type, named by basename.
-//   - total_r<rate> and service_r<rate> contain scheduled and service latency
-//     for successful measured requests only. found_r<rate> and miss_r<rate>
-//     contain the corresponding subsets. Failed and shed requests have no
-//     latency samples.
-//   - In driver.csv, <qtype>_r<rate> is wall: first measured due time to last
-//     measured completion, including errors. The row is absent when nothing
-//     completed; _millirps and _shed are then what says the leg ran.
-//     _millirps is successful / arrival.Seconds() * 1000 in duration columns:
-//     a window ratio, not completion throughput. _lag contains dispatch lag
-//     for every measured position, including shed; _shed is the shed count.
-//   - query-accounting.csv has <qtype>_r<rate><suffix> rows for each leg.
-//     _target_millirps is the target rate * 1000; _completion_millirps is
-//     successful / elapsed.Seconds() * 1000, both in duration columns.
-//     _scheduled, _dispatched, _successful, _failed and a duplicate _shed store
-//     measured request counts in n_items with duration zero. scheduled =
-//     dispatched + shed; dispatched = successful + failed. Warmup is excluded.
-//     _arrival is scheduled * interval; _elapsed is max(arrival, wall), which
-//     includes the final arrival interval; _drain is max(wall - arrival, 0).
-//   - In driver.csv and query-accounting.csv,
-//     zero lag, drain, rate and count observations are retained. Scalar rows
-//     have n=1; n_items is zero for rate, _arrival, _elapsed and _drain rows.
-//   - A driver row with no _r<rate> segment (open, evict, peak_rss_bytes) is
-//     setup.
+// name. The external results converter reads the query-type CSVs and
+// driver.csv. It recognizes only wall, _millirps, _lag and _shed as driver leg
+// rows and classifies every other driver row as setup. So the driver.csv row
+// set stays fixed, and completion accounting goes in query-accounting.csv.
 func querySpecs(types []string, rates []float64) []fileSpec {
 	specs := make([]fileSpec, 0, len(types)+2)
 	legSuffixes := []string{driverLegRPSSuffix, driverLegLagSuffix, driverLegShedSuffix}
-	accountingSuffixes := []string{
-		driverLegTargetRPSSuffix, driverLegCompletionRPSSuffix,
-		driverLegScheduledSuffix, driverLegDispatchedSuffix, driverLegSuccessSuffix, driverLegFailedSuffix,
-		driverLegShedSuffix,
-		driverLegArrivalSuffix, driverLegElapsedSuffix, driverLegDrainSuffix,
-	}
+	accountingSuffixes := slices.Concat(
+		[]string{driverLegTargetRPSSuffix, driverLegCompletionRPSSuffix},
+		driverLegCountSuffixes,
+		[]string{driverLegArrivalSuffix, driverLegElapsedSuffix, driverLegDrainSuffix},
+	)
 	driverRows := make([]string, 0, len(types)*len(rates)*(len(legSuffixes)+1)+3)
 	accountingRows := make([]string, 0, len(types)*len(rates)*len(accountingSuffixes))
 	driverRows = append(driverRows, driverQueryOpen, driverQueryEvict)
@@ -238,45 +164,32 @@ type rowKey struct {
 	file, row string
 }
 
-// csvSink is an ingest.MetricSink AND an observability.Metrics that records
-// every signal in memory and, on writeCSVs, aggregates them into percentile
-// CSVs (stage,n,n_items,total_ns,p50_ns,p90_ns,p99_ns,max_ns) laid out per
-// fileSpecs. n counts included samples (see keepsZeroSamples); n_items sums
-// their natural item counts. Other zero-duration samples are dropped so empty
-// ledger stages do not skew percentiles. Rows with no included samples — and
-// files with no rows — are suppressed. Most signals map one-to-one onto a
-// sample; HotPhase additionally reconstructs the per-ledger ingest_total row
-// from each ledger's phase burst (see HotPhase).
+// csvSink is an ingest.MetricSink and an observability.Metrics. It keeps every
+// signal in memory as a raw sample and, on writeCSVs, aggregates each row into
+// percentiles laid out per specs. n counts the included samples and n_items
+// sums their item counts. Zero-duration samples are dropped, so that empty
+// ledger stages do not skew percentiles, except in rows where keepsZeroSamples
+// holds. Rows with no included samples, and files with no rows, are suppressed.
 //
-// Of the observability signals only the durations a bench run produces are
-// recorded (Freeze — the backfill wall — and Rebuild — one index build each);
-// LastCommitted is tracked as a gauge for the hot driver's completion check,
-// and the rest carry no bench signal so they are dropped — Prune does fire
-// from each index build's eager sweep, but its wall is already inside Rebuild
-// and a fresh scratch run sweeps ~nothing; the others never fire.
+// Of the observability signals, csvSink records Freeze, Rebuild and
+// LastCommitted and drops the rest. Prune fires from each index build's eager
+// sweep, but Rebuild already includes that wall.
 //
-// All methods are safe for concurrent use (one mutex), as the MetricSink
-// contract requires: the backfill scheduler runs several chunk freezes against
-// one sink.
+// All methods are safe for concurrent use: the backfill scheduler runs several
+// chunk freezes against one sink.
 type csvSink struct {
-	specs []fileSpec // the report schema; read-only after construction
+	specs []fileSpec // read-only after construction
 
-	mu   sync.Mutex
-	rows map[rowKey]*series // every signal is one sample on a (file, row) key
+	mu       sync.Mutex
+	rows     map[rowKey]*series
+	hotBurst time.Duration // the current hot ledger's phase sum (see HotPhase)
 
-	// hotBurst accumulates the current hot ledger's HotPhase durations so
-	// HotPhase can reconstruct the per-ledger end-to-end ingest_total (the
-	// phases partition the per-ledger total). Guarded by mu.
-	hotBurst time.Duration
-
-	// lastSeq mirrors the loop's last-committed gauge (Metrics.LastCommitted,
-	// set once per ingested ledger) so the hot driver can verify the bounded
-	// run reached its final ledger.
+	// lastSeq is the last Metrics.LastCommitted value. The hot driver uses it
+	// to check that the run reached its final ledger.
 	lastSeq atomic.Uint32
 
-	// schedule is the paced hot run's close schedule (--close-interval > 0);
-	// LastCommitted measures each committed ledger's lag against it. Nil in
-	// every other run — cold, or unpaced hot — which records no pace_lag.
+	// schedule is the paced hot run's close schedule; nil when the run is not
+	// paced.
 	schedule *paceSchedule
 }
 
@@ -295,29 +208,19 @@ func newSchemaCSVSink(specs []fileSpec) *csvSink {
 	return &csvSink{rows: make(map[rowKey]*series), specs: specs}
 }
 
-// HotPhase records one phase of one hot ledger ingest into hot.csv, and
-// reconstructs the per-ledger end-to-end ingest_total for driver.csv from the
-// phase burst.
+// HotPhase records one hot ingest phase into hot.csv. It also sums each
+// ledger's phases into one driver.csv ingest_total sample, because per-phase
+// percentiles do not add up to a per-ledger total.
 //
-// The production hot loop (runIngestionLoop) is a SINGLE goroutine, so HotPhase
-// signals arrive as strict per-ledger bursts in hotchunk.Phase order:
-// extract → ledgers → txhash → events → commit → apply, one burst per ledger.
-// The phases partition the per-ledger IngestLedger wall-clock, so their sum IS
-// the per-ledger total — a number per-phase percentiles can't recover
-// (percentiles don't sum). PhaseExtract (always first) resets the accumulator
-// for a new ledger; PhaseApply (terminal, emitted on the success path only —
-// never the failed phase) records one ingest_total sample with items=1. A
-// failed ledger never reaches PhaseApply, so it contributes nothing (the run
-// aborts and partial CSVs are written anyway).
-//
-// The accumulator is mutex-guarded so the sink stays safe under the MetricSink
-// contract regardless; only the production single-writer pattern yields
-// meaningful sums (interleaved bursts would sum across ledgers, never race).
+// The production hot loop is one goroutine, so phases arrive as one burst per
+// ledger in hotchunk.Phase order. PhaseExtract starts a burst. PhaseApply ends
+// it and is emitted only on success, so a failed ledger records no
+// ingest_total. Interleaved bursts from several goroutines are safe but sum
+// across ledgers.
 func (s *csvSink) HotPhase(phase hotchunk.Phase, d time.Duration, items int, _ error) {
 	s.observe(fileHot, phase.String(), d, items)
 
-	// Accumulator under its own critical section, released before the observe
-	// below so the two locks are sequential, never nested.
+	// Release mu before observe takes it again.
 	s.mu.Lock()
 	if phase == hotchunk.PhaseExtract {
 		s.hotBurst = 0
@@ -341,9 +244,8 @@ func (s *csvSink) ColdChunkTotal(d time.Duration) {
 	s.observe(fileDriver, driverChunkTotal, d, 0)
 }
 
-// ColdExtract records the shared per-ledger ExtractLedgerTxParts walk —
-// ledger-scoped and type-less, so it lands in driver.csv (see
-// driverColdExtract).
+// ColdExtract records the per-ledger ExtractLedgerTxParts walk that all data
+// types share.
 func (s *csvSink) ColdExtract(d time.Duration, items int, _ error) {
 	s.observe(fileDriver, driverColdExtract, d, items)
 }
@@ -364,18 +266,14 @@ func (s *csvSink) Rebuild(d time.Duration) {
 	s.observe(fileDriver, driverIndexRebuild, d, 0)
 }
 
-// LastCommitted tracks the hot loop's per-ledger committed gauge (see lastSeq),
-// and — for a paced run — records that ledger's lag behind the close schedule.
+// LastCommitted stores the hot loop's committed gauge and, in a paced run,
+// records that ledger's pace lag.
 func (s *csvSink) LastCommitted(lastCommitted uint32) {
 	s.lastSeq.Store(lastCommitted)
 	if s.schedule != nil {
 		s.recordPaceLag(lastCommitted)
 	}
 }
-
-// The remaining observability signals carry no useful bench signal and are
-// accepted and dropped — Prune does fire (from each index build's eager
-// sweep) but its wall is already inside Rebuild; the others never fire.
 
 func (s *csvSink) RetentionFloor(uint32) {}
 
@@ -393,9 +291,7 @@ func (s *csvSink) FailedDestroy() {}
 
 func (s *csvSink) TxIndexInconsistency() {}
 
-// observe appends one sample to the (file, row) series, creating it on first
-// use. Every recording method lands here. (funcorder pins it below the
-// exported methods it serves.)
+// observe appends one sample to the (file, row) series.
 func (s *csvSink) observe(fileName, rowName string, d time.Duration, items int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -427,12 +323,9 @@ func (s *csvSink) sumDriver(name string) time.Duration {
 	return total
 }
 
-// recordPaceLag records how far past its scheduled due time ledger seq
-// committed: lag = now − due(seq), clamped at ≥ 0 (defensive: through the
-// pacer a commit never precedes its due time), as one driverPaceLag sample
-// with items=1. On pace, a ledger starts at its due time, so its lag at
-// commit ≈ its own ingest time; a lag that grows across the run means
-// ingestion cannot keep up with the close cadence and the backlog is growing.
+// recordPaceLag records how far past its due time ledger seq committed,
+// clamped at zero, as one pace_lag sample. A lag that grows across the run
+// means ingestion does not keep up with the close cadence.
 func (s *csvSink) recordPaceLag(seq uint32) {
 	due, ok := s.schedule.dueForSeq(seq)
 	if !ok {
@@ -486,9 +379,8 @@ func aggregate(name string, s *series, includeZeros bool) (row, bool) {
 	}, true
 }
 
-// withUnknown returns order plus any keys of m not already in it, sorted and
-// appended after the known order, so a recorded label outside the known
-// vocabulary still appears, after the known rows.
+// withUnknown returns order followed by the sorted keys of m that order does
+// not contain.
 func withUnknown[V any](order []string, m map[string]V) []string {
 	var extra []string
 	for k := range m {
@@ -503,28 +395,38 @@ func withUnknown[V any](order []string, m map[string]V) []string {
 	return append(slices.Clone(order), extra...)
 }
 
-// keepsZeroSamples reports whether a row's zero-duration samples are real
-// observations (on-time dispatch, counts, zero rate or drain) and are kept.
-// driver.csv and query-accounting.csv match them by suffix; the ingest report's
-// pace_lag ends in _lag. Per-query CSVs exclude zero-duration samples.
+// keepsZeroSamples reports whether a row keeps its zero-duration samples,
+// because zero is a real observation there: the lag (including pace_lag),
+// drain, rate and count rows of driver.csv and query-accounting.csv.
 func keepsZeroSamples(file, label string) bool {
-	return (file == fileDriver || file == fileQueryAccounting) && (strings.HasSuffix(label, driverLegLagSuffix) ||
-		driverLegCountSuffix(label) != "" ||
+	if file != fileDriver && file != fileQueryAccounting {
+		return false
+	}
+	_, isCount := legCountName(label)
+	return isCount ||
+		strings.HasSuffix(label, driverLegLagSuffix) ||
 		strings.HasSuffix(label, driverLegDrainSuffix) ||
-		strings.HasSuffix(label, driverLegRPSSuffix))
+		strings.HasSuffix(label, driverLegRPSSuffix)
 }
 
-// driverLegCountSuffix identifies rows whose request count is stored in n_items.
-func driverLegCountSuffix(label string) string {
-	for _, suffix := range []string{
-		driverLegScheduledSuffix, driverLegDispatchedSuffix, driverLegSuccessSuffix,
-		driverLegFailedSuffix, driverLegShedSuffix,
-	} {
+// driverLegCountSuffixes are the leg rows that store a request count in
+// n_items, with duration zero.
+//
+//nolint:gochecknoglobals // fixed report vocabulary, read-only
+var driverLegCountSuffixes = []string{
+	driverLegScheduledSuffix, driverLegDispatchedSuffix, driverLegSuccessSuffix,
+	driverLegFailedSuffix, driverLegShedSuffix,
+}
+
+// legCountName returns the count that a count row stores, such as "shed" for a
+// _shed row. ok is false for any other row.
+func legCountName(label string) (string, bool) {
+	for _, suffix := range driverLegCountSuffixes {
 		if strings.HasSuffix(label, suffix) {
-			return suffix
+			return strings.TrimPrefix(suffix, "_"), true
 		}
 	}
-	return ""
+	return "", false
 }
 
 // file is one aggregated CSV file: its basename (without .csv) and its rows.
@@ -614,8 +516,7 @@ func writeCSV(path string, rows []row) error {
 	return nil
 }
 
-// logSummary logs one percentile line per aggregated row, through the logger
-// (forbidigo bans fmt.Print*).
+// logSummary logs one line per aggregated row.
 func (s *csvSink) logSummary(logger *supportlog.Entry) {
 	for _, f := range s.files() {
 		for _, r := range f.rows {
@@ -624,10 +525,12 @@ func (s *csvSink) logSummary(logger *supportlog.Entry) {
 	}
 }
 
-// logRow logs one aggregated row with units for driver and accounting metrics.
+// logRow logs one aggregated row. The rate and count rows of driver.csv and
+// query-accounting.csv, and driver.csv's peak_rss_bytes, print in their own
+// units.
 func logRow(logger *supportlog.Entry, fileName string, r row) {
 	if fileName == fileDriver || fileName == fileQueryAccounting {
-		count := driverLegCountSuffix(r.name)
+		count, isCount := legCountName(r.name)
 		switch {
 		case fileName == fileDriver && r.name == driverPeakRSS:
 			logger.Infof("%-10s %-12s n=%-7d bytes=%d", fileName, r.name, r.n, r.total.Nanoseconds())
@@ -641,8 +544,8 @@ func logRow(logger *supportlog.Entry, fileName string, r row) {
 			logger.Infof("%-10s %-12s n=%-7d window_rps=%.3f", fileName, r.name, r.n,
 				float64(r.total.Nanoseconds())/milliPerUnit)
 			return
-		case count != "":
-			logger.Infof("%-10s %-12s n=%-7d %s=%d", fileName, r.name, r.n, count[1:], r.items)
+		case isCount:
+			logger.Infof("%-10s %-12s n=%-7d %s=%d", fileName, r.name, r.n, count, r.items)
 			return
 		}
 	}
