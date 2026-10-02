@@ -402,16 +402,11 @@ func aggregate(name string, s *series, includeZeros bool) (row, bool) {
 	for _, d := range durs {
 		total += d
 	}
-	pick := func(p float64) time.Duration {
-		i := int(p * float64(len(durs)))
-		if i >= len(durs) {
-			i = len(durs) - 1
-		}
-		return durs[i]
-	}
+	// pick is the nearest-rank percentile: the sample at rank ceil(pct*n/100).
+	pick := func(pct int) time.Duration { return durs[(pct*len(durs)+99)/100-1] }
 	return row{
 		name: name, n: len(durs), items: items, total: total,
-		p50: pick(0.50), p90: pick(0.90), p99: pick(0.99), maxv: durs[len(durs)-1],
+		p50: pick(50), p90: pick(90), p99: pick(99), maxv: durs[len(durs)-1],
 	}, true
 }
 
