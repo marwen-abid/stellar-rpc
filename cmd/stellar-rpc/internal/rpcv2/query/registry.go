@@ -343,10 +343,9 @@ func (r *Registry) NewReadView() (*ReadView, error) {
 // publishReadyHandles opens and publishes a handle for every ready hot chunk
 // except liveChunk, whose handle OpenRegistry publishes from the caller's open.
 // These are completed chunks a prior run left ready (not yet discarded); queries
-// read them hot until the freeze covers them cold. They are opened read-write so
-// the events facade is warmed (a read-only open is ledgers-only), and the
-// registry closes them at discard. Runs at startup before any read view is
-// acquired.
+// read them hot until the freeze covers them cold. They are opened read-write
+// because the daemon's registry owns writer handles, and the registry closes
+// them at discard. Runs at startup before any read view is acquired.
 func (r *Registry) publishReadyHandles(liveChunk chunk.ID, logger *supportlog.Entry) error {
 	ready, err := r.catalog.ReadyHotChunkKeys()
 	if err != nil {

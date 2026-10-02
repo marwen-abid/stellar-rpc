@@ -3,6 +3,7 @@ package hotchunk
 import (
 	"bytes"
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/linxGnu/grocksdb"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rocksdb"
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/rpcv2test/fileset"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/event"
 	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/stores/ledger"
@@ -700,4 +702,125 @@ func readLedgerRaw(r interface {
 		return nil
 	})
 	return out, err
+}
+
+// eventsTestDataset writes a closed hot DB for chunk 0 with three ledgers, one
+// contract event each, and returns its directory, the tx hashes and the
+// shared event term key.
+func eventsTestDataset(t *testing.T) (string, [][32]byte, event.TermKey) {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := Open(dir, chunk.ID(0), silentLogger())
+	require.NoError(t, err)
+	first := chunk.ID(0).FirstLedger()
+	var hashes [][32]byte
+	var key event.TermKey
+	for seq := first; seq < first+3; seq++ {
+		raw, hash, k := lcmWithEvent(t, seq)
+		_, err := ingestRaw(t, db, seq, raw)
+		require.NoError(t, err)
+		hashes = append(hashes, hash)
+		key = k
+	}
+	require.NoError(t, db.Close())
+	return dir, hashes, key
+}
+
+// eventsView is what the events facade returns for the test dataset.
+type eventsView struct {
+	count    uint32
+	bitmap   []uint32
+	payloads []event.Payload
+}
+
+func readEvents(t *testing.T, es *event.HotStore, key event.TermKey) eventsView {
+	t.Helper()
+	ctx := context.Background()
+	bms, err := es.LookupKeys(ctx, []event.TermKey{key})
+	require.NoError(t, err)
+	require.Len(t, bms, 1)
+	require.NotNil(t, bms[0])
+	ids := bms[0].ToArray()
+	payloads, err := es.FetchEvents(ctx, ids)
+	require.NoError(t, err)
+	return eventsView{count: eventCount(t, es), bitmap: ids, payloads: payloads}
+}
+
+func TestOpenReadOnlyWithEvents_FileSetUnchanged(t *testing.T) {
+	dir, hashes, key := eventsTestDataset(t)
+	first := chunk.ID(0).FirstLedger()
+	before := fileset.Take(t, dir)
+
+	ro, err := OpenReadOnlyWithEvents(dir, chunk.ID(0), silentLogger())
+	require.NoError(t, err)
+
+	seq, ok, err := ro.MaxCommittedSeq()
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, first+2, seq)
+
+	raw, err := readLedgerRaw(ro.Ledgers(), first)
+	require.NoError(t, err)
+	assert.NotEmpty(t, raw)
+	n := 0
+	for _, err := range ro.Ledgers().IterateLedgers(first, first+2) {
+		require.NoError(t, err)
+		n++
+	}
+	assert.Equal(t, 3, n)
+
+	got, err := ro.Txhash().Get(hashes[1])
+	require.NoError(t, err)
+	assert.Equal(t, first+1, got)
+
+	offsets, err := ro.Events().Offsets()
+	require.NoError(t, err)
+	require.NotNil(t, offsets)
+	view := readEvents(t, ro.Events(), key)
+	assert.Equal(t, uint32(3), view.count)
+	assert.Equal(t, []uint32{0, 1, 2}, view.bitmap)
+	var ranged []event.Payload
+	for p, err := range ro.Events().FetchRange(context.Background(), 0, 3) {
+		require.NoError(t, err)
+		ranged = append(ranged, p)
+	}
+	assert.Equal(t, view.payloads, ranged)
+
+	require.NoError(t, ro.Close())
+	fileset.RequireUnchanged(t, dir, before)
+}
+
+func TestOpenReadOnlyWithEvents_MatchesWriteOpen(t *testing.T) {
+	dir, _, key := eventsTestDataset(t)
+
+	rw, err := OpenExisting(dir, chunk.ID(0), silentLogger())
+	require.NoError(t, err)
+	want := readEvents(t, rw.Events(), key)
+	require.NoError(t, rw.Close())
+	require.Equal(t, uint32(3), want.count)
+
+	ro, err := OpenReadOnlyWithEvents(dir, chunk.ID(0), silentLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ro.Close()) })
+	assert.Equal(t, want, readEvents(t, ro.Events(), key))
+}
+
+func TestOpenReadOnlyWithEvents_RejectsWrites(t *testing.T) {
+	dir, _, _ := eventsTestDataset(t)
+	first := chunk.ID(0).FirstLedger()
+	before := fileset.Take(t, dir)
+
+	ro, err := OpenReadOnlyWithEvents(dir, chunk.ID(0), silentLogger())
+	require.NoError(t, err)
+	_, err = ingestRaw(t, ro, first+3, zeroTxLCM(t, first+3))
+	require.ErrorContains(t, err, "IngestLedger on a read-only hot DB")
+	require.NoError(t, ro.Close())
+	fileset.RequireUnchanged(t, dir, before)
+}
+
+func TestOpenReadOnlyWithEvents_MissingDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "absent")
+	_, err := OpenReadOnlyWithEvents(path, chunk.ID(0), silentLogger())
+	require.Error(t, err)
+	require.NoDirExists(t, path)
 }
