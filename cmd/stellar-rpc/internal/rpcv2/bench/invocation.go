@@ -23,10 +23,28 @@ type invocationRecord struct {
 	Binary        binaryInfo        `json:"binary"`
 	Hostname      string            `json:"hostname"`
 	StartedAt     string            `json:"startedAt"`
-	FinishedAt    string            `json:"finishedAt"`
+	// FinishedAt is absent while the run is in progress.
+	FinishedAt string `json:"finishedAt,omitempty"`
+	// Extra holds what the run put in runEnv.Extra. Absent when empty.
+	Extra map[string]string `json:"extra,omitempty"`
+	// Status is the run's state. The start record says running; the end
+	// record says ok or failed. A record still at running after the process
+	// exits means the run died before its final write.
+	Status string `json:"status"`
 	// Error carries a failed run's error message; absent on a successful run.
 	Error string `json:"error,omitempty"`
 }
+
+// invocationRecord.Status values.
+const (
+	invocationStatusRunning = "running"
+	invocationStatusOK      = "ok"
+	invocationStatusFailed  = "failed"
+)
+
+// invocationTempPattern names the hidden temp file writeInvocationJSON writes
+// before its rename.
+const invocationTempPattern = ".invocation.json.*.tmp"
 
 // binaryInfo holds build-time information about the binary.
 type binaryInfo struct {
@@ -36,14 +54,14 @@ type binaryInfo struct {
 	Branch         string `json:"branch"`
 }
 
-// writeInvocationJSON writes an invocation record as JSON to outDir/invocation.json.
-// startedAt and finishedAt should be UTC times. runErr is the run's outcome: nil
-// for a successful run, otherwise its message lands in the record's error field.
-// The JSON is formatted with indentation and a trailing newline.
+// writeInvocationJSON writes an invocation record to outDir/invocation.json
+// through a temp file and a rename, so a kill during the write leaves the
+// previous record whole. A zero finishedAt leaves the field out, the record of
+// a run in progress; a non-nil runErr's message fills the error field.
 func writeInvocationJSON(
 	outDir string,
 	cmd *cobra.Command,
-	flags map[string]string,
+	flags, extra map[string]string,
 	startedAt, finishedAt time.Time,
 	runErr error,
 ) error {
@@ -52,6 +70,16 @@ func writeInvocationJSON(
 	var errMsg string
 	if runErr != nil {
 		errMsg = runErr.Error()
+	}
+
+	var finished string
+	status := invocationStatusRunning
+	if !finishedAt.IsZero() {
+		finished = finishedAt.UTC().Format(time.RFC3339)
+		status = invocationStatusOK
+		if runErr != nil {
+			status = invocationStatusFailed
+		}
 	}
 
 	record := invocationRecord{
@@ -66,7 +94,9 @@ func writeInvocationJSON(
 		},
 		Hostname:   hostname,
 		StartedAt:  startedAt.UTC().Format(time.RFC3339),
-		FinishedAt: finishedAt.UTC().Format(time.RFC3339),
+		FinishedAt: finished,
+		Extra:      extra,
+		Status:     status,
 		Error:      errMsg,
 	}
 
@@ -76,8 +106,30 @@ func writeInvocationJSON(
 	}
 
 	path := filepath.Join(outDir, "invocation.json")
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+	// A kill between CreateTemp and Rename leaves the temp file; the next write
+	// removes it. The match is on the entry name only, because outDir can hold
+	// glob metacharacters.
+	if entries, err := os.ReadDir(outDir); err == nil {
+		for _, e := range entries {
+			if ok, _ := filepath.Match(invocationTempPattern, e.Name()); ok {
+				_ = os.Remove(filepath.Join(outDir, e.Name()))
+			}
+		}
+	}
+	tmp, err := os.CreateTemp(outDir, invocationTempPattern)
+	if err != nil {
 		return fmt.Errorf("write invocation.json: %w", err)
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }() // a no-op once the rename lands
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write invocation.json: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("write invocation.json: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("replace invocation.json: %w", err)
 	}
 	return nil
 }
