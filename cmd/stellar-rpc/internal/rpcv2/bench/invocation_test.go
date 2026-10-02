@@ -87,7 +87,7 @@ func TestCommandWritesTheInProgressRecord(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "csv")
 	var ran bool
 
-	cmd := newBenchCommand("probe", "", &profileFlags{},
+	cmd := newBenchCommand("probe", "", &profileFlags{}, nil,
 		func(_ context.Context, _ *supportlog.Entry, env runEnv) error {
 			ran = true
 			data, err := os.ReadFile(filepath.Join(env.OutDir, "invocation.json"))
@@ -112,6 +112,98 @@ func TestCommandWritesTheInProgressRecord(t *testing.T) {
 
 	require.NoError(t, cmd.Execute())
 	require.True(t, ran, "the run body never ran")
+}
+
+// TestCommandPreflightErrorSkipsTheRun: a failed preflight ends the command
+// before the run and before invocation.json is written.
+func TestCommandPreflightErrorSkipsTheRun(t *testing.T) {
+	outDir := filepath.Join(t.TempDir(), "csv")
+	errRefused := errors.New("refused")
+	var ran bool
+
+	cmd := newBenchCommand("probe", "", &profileFlags{},
+		func(string) error { return errRefused },
+		func(context.Context, *supportlog.Entry, runEnv) error {
+			ran = true
+			return nil
+		})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--out", outDir})
+
+	require.ErrorIs(t, cmd.Execute(), errRefused)
+	assert.False(t, ran, "the run body ran after a failed preflight")
+	assert.NoFileExists(t, filepath.Join(outDir, "invocation.json"))
+}
+
+// TestRefuseStaleCSVs: refuseStaleCSVs names any CSV in the dir and passes a
+// dir that holds only invocation.json.
+func TestRefuseStaleCSVs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files []string
+		stale string
+	}{
+		{"csv", []string{"invocation.json", "cold.csv"}, "cold.csv"},
+		{"invocation only", []string{"invocation.json"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := t.TempDir()
+			for _, name := range tc.files {
+				require.NoError(t, os.WriteFile(filepath.Join(out, name), nil, 0o600))
+			}
+			err := refuseStaleCSVs(out)
+			if tc.stale == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, out)
+			require.ErrorContains(t, err, tc.stale)
+		})
+	}
+}
+
+// TestIngestCommandsRefuseOutWithCSVs: an ingest command whose --out holds a
+// CSV fails before it rewrites invocation.json or reads the source: the pack
+// dir does not exist, so reaching the run body would fail with a different
+// error.
+func TestIngestCommandsRefuseOutWithCSVs(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-pack-dir")
+	for _, args := range [][]string{
+		{"cold", "--start-chunk", "0", "--cold-out-dir", t.TempDir(), "--pack-dir", missing},
+		{"hot", "--start-chunk", "0", "--hot-dir", t.TempDir(), "--pack-dir", missing},
+	} {
+		t.Run(args[0], func(t *testing.T) {
+			requireRefusesStaleOut(t, NewCommand(), args, "cold.csv", missing)
+		})
+	}
+}
+
+// requireRefusesStaleOut runs cmd with args and an --out that holds
+// invocation.json and the CSV stale. The command must fail with an error that
+// names stale and not missing, which only the run body would report, and must
+// leave --out unchanged.
+func requireRefusesStaleOut(t *testing.T, cmd *cobra.Command, args []string, stale, missing string) {
+	t.Helper()
+	out := t.TempDir()
+	invocation := []byte(`{"command":"earlier run"}`)
+	require.NoError(t, os.WriteFile(filepath.Join(out, "invocation.json"), invocation, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(out, stale), nil, 0o600))
+
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(append(args, "--out", out))
+	err := cmd.Execute()
+	require.ErrorContains(t, err, stale)
+	require.ErrorContains(t, err, "pass an empty --out")
+	assert.NotContains(t, err.Error(), missing, "the run body must not run")
+
+	got, readErr := os.ReadFile(filepath.Join(out, "invocation.json"))
+	require.NoError(t, readErr)
+	assert.Equal(t, string(invocation), string(got), "a refused run must leave invocation.json unchanged")
+	entries, readErr := os.ReadDir(out)
+	require.NoError(t, readErr)
+	assert.Len(t, entries, 2, "a refused run must add no files to --out")
 }
 
 // TestWriteInvocationJSONInProgress: a zero finishedAt writes a record with no
