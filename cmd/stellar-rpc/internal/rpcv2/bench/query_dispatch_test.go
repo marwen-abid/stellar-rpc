@@ -40,11 +40,11 @@ func TestRunPacedLegMeasuredCount(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 20, res.dispatched)
-	assert.Equal(t, 20, res.scheduled)
+	assert.Equal(t, 20, res.positions)
 	assert.Len(t, res.samples, 20)
 	assert.Len(t, res.lags, 20)
-	assert.Equal(t, 0, res.shed)
-	assert.Equal(t, 0, res.errs)
+	assert.Equal(t, 0, res.measured.shed)
+	assert.Equal(t, 0, res.measured.errs)
 	assert.Equal(t, int64(25), fake.calls.Load(), "warmup requests run at the leg's rate")
 	assert.Positive(t, res.wall)
 	assert.Equal(t, arrivalWindow(rps, res), res.arrival)
@@ -126,10 +126,10 @@ func TestRunPacedLegSheds(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, maxInFlight, res.dispatched)
-	assert.Equal(t, 1000-maxInFlight, res.shed)
-	assert.Equal(t, 1000, res.dispatched+res.shed)
-	assert.Equal(t, res.scheduled, res.dispatched+res.shed)
-	assert.Equal(t, res.dispatched, len(res.samples)+res.errs)
+	assert.Equal(t, 1000-maxInFlight, res.measured.shed)
+	assert.Equal(t, 1000, res.dispatched+res.measured.shed)
+	assert.Equal(t, res.positions, res.dispatched+res.measured.shed)
+	assert.Equal(t, res.dispatched, len(res.samples)+res.measured.errs)
 	assert.Len(t, res.samples, maxInFlight)
 	assert.Len(t, res.lags, 1000, "every measured position is charged a dispatch lag")
 	assert.Equal(t, int64(maxInFlight), fake.calls.Load())
@@ -153,18 +153,18 @@ func TestRunPacedLegCountsErrors(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 20, res.dispatched)
-	assert.Equal(t, res.scheduled, res.dispatched+res.shed)
-	assert.Equal(t, res.dispatched, len(res.samples)+res.errs)
-	assert.Equal(t, 10, res.errs)
+	assert.Equal(t, res.positions, res.dispatched+res.measured.shed)
+	assert.Equal(t, res.dispatched, len(res.samples)+res.measured.errs)
+	assert.Equal(t, 10, res.measured.errs)
 	assert.Len(t, res.samples, 10)
 	assert.Len(t, res.lags, 20)
-	assert.Equal(t, 0, res.shed)
+	assert.Equal(t, 0, res.measured.shed)
 	assert.Equal(t, arrivalWindow(rps, res), res.arrival)
 }
 
 // arrivalWindow is the expected legResult.arrival of a leg at rps.
 func arrivalWindow(rps float64, res legResult) time.Duration {
-	return time.Duration(res.dispatched+res.shed) * legInterval(rps)
+	return time.Duration(res.dispatched+res.measured.shed) * legInterval(rps)
 }
 
 // TestRunPacedLegRoundsTheInterval: the schedule and the arrival window use the
@@ -175,7 +175,7 @@ func TestRunPacedLegRoundsTheInterval(t *testing.T) {
 	req := func(*rand.Rand) (cellSample, error) { return cellSample{items: 1}, nil }
 	res, err := runPacedLeg(t.Context(), 7, 150*time.Millisecond, 0, 1, req)
 	require.NoError(t, err)
-	assert.Equal(t, 1, res.scheduled)
+	assert.Equal(t, 1, res.positions)
 	assert.Equal(t, 142857143*time.Nanosecond, res.arrival)
 }
 
@@ -204,7 +204,7 @@ func TestRunPacedLegContextCancel(t *testing.T) {
 	assert.Equal(t, int64(0), inFlight.Load())
 
 	// Position 0 runs at once; position 1 is due at 500ms, after the cancel.
-	assert.Equal(t, 1, res.scheduled)
+	assert.Equal(t, 1, res.positions)
 	assert.Equal(t, 1, res.dispatched)
 	assert.Len(t, res.samples, 1)
 	assert.Len(t, res.lags, 1)
@@ -253,7 +253,7 @@ func TestLaunchPacedRequestChargesLateDispatch(t *testing.T) {
 	leg.launch(0, due, time.Now(), true)
 	leg.wg.Wait()
 
-	res := leg.result(due)
+	res := leg.result(due, legInterval(1))
 	require.Len(t, res.samples, 1)
 	require.Len(t, res.lags, 1)
 	assert.GreaterOrEqual(t, res.samples[0].scheduled, late, "the client waited from the due time")
@@ -314,11 +314,11 @@ func TestRunPacedLegNanosecondInterval(t *testing.T) {
 			req := func(*rand.Rand) (cellSample, error) { return cellSample{items: 1}, nil }
 			res, err := runPacedLeg(t.Context(), rps, time.Nanosecond, 0, 1, req)
 			require.NoError(t, err)
-			assert.Equal(t, 1, res.scheduled)
+			assert.Equal(t, 1, res.positions)
 			assert.Equal(t, 1, res.dispatched)
 			assert.Len(t, res.samples, 1)
-			assert.Zero(t, res.shed)
-			assert.Zero(t, res.errs)
+			assert.Zero(t, res.measured.shed)
+			assert.Zero(t, res.measured.errs)
 			assert.Equal(t, time.Nanosecond, res.arrival)
 		})
 	}
@@ -344,11 +344,13 @@ func TestPacedLegAccountingWindows(t *testing.T) {
 			leg := newPacedLeg(nil, 1, 100, 2)
 			if tc.success > 0 {
 				leg.recordSample(cellSample{}, firstDue.Add(tc.success))
+				leg.lags = append(leg.lags, 0)
 				leg.dispatched++
 			}
 			if tc.fail > 0 {
 				for leg.dispatched < 2 {
-					leg.recordError(errors.New("request failed"), firstDue.Add(tc.fail))
+					leg.recordError(&leg.measured, errors.New("request failed"), firstDue.Add(tc.fail))
+					leg.lags = append(leg.lags, 0)
 					leg.dispatched++
 				}
 			}
@@ -359,11 +361,10 @@ func TestPacedLegAccountingWindows(t *testing.T) {
 			for pos := leg.dispatched; pos < 2; pos++ {
 				leg.launch(pos, firstDue.Add(time.Duration(pos)*interval), firstDue, true)
 			}
-			res := leg.result(firstDue)
-			res.finish(2, interval)
-			assert.Equal(t, 2, res.scheduled)
-			assert.Equal(t, res.scheduled, res.dispatched+res.shed)
-			assert.Equal(t, res.dispatched, len(res.samples)+res.errs)
+			res := leg.result(firstDue, interval)
+			assert.Equal(t, 2, res.positions)
+			assert.Equal(t, res.positions, res.dispatched+res.measured.shed)
+			assert.Equal(t, res.dispatched, len(res.samples)+res.measured.errs)
 			assert.Equal(t, 2*interval, res.arrival)
 			assert.Equal(t, tc.wall, res.wall)
 			assert.Equal(t, 2*interval+tc.drain, res.elapsed)

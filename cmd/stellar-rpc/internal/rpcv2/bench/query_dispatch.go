@@ -10,9 +10,6 @@ import (
 	"time"
 )
 
-// The query bench's dispatcher: it issues a queryRequest at a fixed arrival
-// rate and collects what each request observed.
-
 // cellSample is one measured request.
 type cellSample struct {
 	// service is the request body's run time.
@@ -21,28 +18,26 @@ type cellSample struct {
 	scheduled time.Duration
 	// items counts what the response carried.
 	items int
-	// stage names a sub-stage row (txhash: found or miss); stageNone otherwise.
+	// stage is the txhash sub-stage row (found or miss), or stageNone.
 	stage sampleStage
 }
 
-// sampleStage names a sub-stage row.
 type sampleStage uint8
 
 const (
-	// stageNone is a sample with no sub-stage row.
 	stageNone sampleStage = iota
-	// stageFound is a txhash sample for the txHashStageFound row.
+
+	// txhash sub-stage rows.
 	stageFound //nolint:unused // consumed by bench-query/02-read-path, the next PR in this stack
-	// stageMiss is a txhash sample for the txHashStageMiss row.
-	stageMiss //nolint:unused // consumed by bench-query/02-read-path, the next PR in this stack
+	stageMiss  //nolint:unused // consumed by bench-query/02-read-path, the next PR in this stack
 )
 
 // queryRequest issues one request. Calls run concurrently on separate
 // goroutines; rng is per call. Read-view acquisition is inside the timer.
 type queryRequest func(rng *rand.Rand) (cellSample, error)
 
-// maxInFlight caps a leg's outstanding requests; a request due at a full cap
-// is shed.
+// maxInFlight caps a leg's outstanding requests. A request due at a full cap
+// is shed, so a slow server cannot grow the goroutine count without bound.
 const maxInFlight = 512
 
 // minLegRPS is the lowest leg rate. A lower rate stores zero in the report's
@@ -55,79 +50,64 @@ const minLegRPS = 1.0 / milliPerUnit
 // adds up over types × rates.
 const maxLegRequests = 100_000_000
 
-// Mixing constants for legRNG: odd and mutually prime.
-const (
-	legSeedRateHi = 1000003
-	legSeedRateLo = 73
-	legSeedStride = 7919
-)
+// phaseStats counts one phase's failures: shed positions and failed requests.
+// firstErr is nil when errs is zero.
+type phaseStats struct {
+	shed     int
+	errs     int
+	firstErr error
+}
 
-// legRecord holds what a leg records as it runs. pacedLeg fills it; legResult
-// carries it out.
+// legRecord holds what a leg records as it runs. The dispatch goroutine writes
+// lags, dispatched and each phase's shed without the lock. The request
+// goroutines write samples and each phase's errs and firstErr under
+// pacedLeg.mu.
 type legRecord struct {
-	// Written by the dispatch goroutine only.
 	lags       []time.Duration // dispatch lag per measured position, shed ones included
 	dispatched int             // measured requests that ran
-	shed       int             // measured positions dropped at a full maxInFlight
-	warmupShed int             // warmup positions dropped at a full maxInFlight
+	samples    []cellSample    // measured requests that succeeded
 
-	// Written by the request goroutines, under pacedLeg.mu. A first error is
-	// the first to take the mutex; it is nil when its count is zero.
-	samples        []cellSample // measured requests that succeeded
-	errs           int
-	firstErr       error
-	warmupErrs     int
-	firstWarmupErr error
+	warmup   phaseStats
+	measured phaseStats
 }
 
 // legResult is one paced leg's outcome.
 type legResult struct {
 	legRecord
 
-	// arrival is measured positions * interval, the effective arrival window.
+	// positions counts the measured positions: the planned count, or the
+	// positions reached before a cancel.
+	positions int
+	// arrival is positions × interval, the effective arrival window.
 	arrival time.Duration
 	// wall spans the first measured due time to the last measured completion.
 	// It is zero if no measured request completed; errors count as completions.
 	wall time.Duration
-	// elapsed is max(arrival, wall), including the final arrival interval.
+	// elapsed is max(arrival, wall).
 	elapsed time.Duration
-	// drain is max(wall - arrival, 0), completion time beyond the arrival window.
+	// drain is the completion time beyond the arrival window, max(wall - arrival, 0).
 	drain time.Duration
-	// scheduled counts the measured positions: the planned count, or the
-	// positions reached before a cancel.
-	scheduled int
-}
-
-// finish sets the accounting window for measured positions after all requests
-// finish.
-func (r *legResult) finish(measured int, interval time.Duration) {
-	r.scheduled = measured
-	r.arrival = time.Duration(measured) * interval
-	r.elapsed = max(r.arrival, r.wall)
-	r.drain = max(r.wall-r.arrival, 0)
 }
 
 // pacedLeg is one leg's dispatch state.
 type pacedLeg struct {
 	legRecord
 
-	req   queryRequest
-	seed  int64
-	rps   float64
-	wg    sync.WaitGroup
-	slots chan struct{}
+	req    queryRequest
+	rngKey uint64
+	wg     sync.WaitGroup
+	slots  chan struct{}
 
-	// mu guards the request goroutines' legRecord fields and lastDone.
+	// mu guards lastDone and the legRecord fields of the request goroutines.
 	mu       sync.Mutex
 	lastDone time.Time
 }
 
 func newPacedLeg(req queryRequest, seed int64, rps float64, measured int) *pacedLeg {
 	return &pacedLeg{
-		req:   req,
-		seed:  seed,
-		rps:   rps,
-		slots: make(chan struct{}, maxInFlight),
+		req:    req,
+		rngKey: legRNGKey(seed, rps),
+		slots:  make(chan struct{}, maxInFlight),
 		legRecord: legRecord{
 			lags:    make([]time.Duration, 0, measured),
 			samples: make([]cellSample, 0, measured),
@@ -144,38 +124,32 @@ func (l *pacedLeg) recordSample(s cellSample, done time.Time) {
 	}
 }
 
-func (l *pacedLeg) recordError(err error, done time.Time) {
+// recordError counts a failed request in phase p. Only a measured error moves
+// lastDone, which bounds the measured window.
+func (l *pacedLeg) recordError(p *phaseStats, err error, done time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.errs++
-	if l.firstErr == nil {
-		l.firstErr = err
+	p.errs++
+	if p.firstErr == nil {
+		p.firstErr = err
 	}
-	if done.After(l.lastDone) {
+	if p == &l.measured && done.After(l.lastDone) {
 		l.lastDone = done
 	}
 }
 
-// recordWarmupError counts a failed warmup request. It leaves lastDone alone,
-// which bounds the measured window only.
-func (l *pacedLeg) recordWarmupError(err error) {
+// result assembles the leg's outcome once every request has returned. Each
+// measured position reached has one lag, so len(lags) is the position count.
+func (l *pacedLeg) result(firstDue time.Time, interval time.Duration) legResult {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.warmupErrs++
-	if l.firstWarmupErr == nil {
-		l.firstWarmupErr = err
-	}
-}
-
-// result assembles the leg's outcome once every request has returned. wall is
-// measured from firstDue and is zero when nothing completed.
-func (l *pacedLeg) result(firstDue time.Time) legResult {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := legResult{legRecord: l.legRecord}
+	out := legResult{legRecord: l.legRecord, positions: len(l.lags)}
 	if !l.lastDone.IsZero() {
 		out.wall = l.lastDone.Sub(firstDue)
 	}
+	out.arrival = time.Duration(out.positions) * interval
+	out.elapsed = max(out.arrival, out.wall)
+	out.drain = max(out.wall-out.arrival, 0)
 	return out
 }
 
@@ -185,57 +159,64 @@ func legInterval(rps float64) time.Duration {
 	return time.Duration(math.Round(float64(time.Second) / rps))
 }
 
-// runPacedLeg issues req at rps requests per second: position i is due at
-// anchor + i×interval, anchor being the first dispatch. Positions 0 to
-// warmup-1 are unmeasured; the round(rps × duration) positions after them are
-// measured.
-//
-// A non-nil error is a bad argument or a context error. After a bad argument
-// the result is empty. After a context error the result covers the positions
-// dispatched before the cancel, and scheduled counts them, so a caller can
-// report the leg as PARTIAL. A failing request is counted in errs and does
-// not end the leg.
-func runPacedLeg(
-	ctx context.Context, rps float64, duration time.Duration, warmup int, seed int64, req queryRequest,
-) (legResult, error) {
+// validateLeg checks a leg's arguments and returns its interval and measured
+// position count. warmup must be non-negative.
+func validateLeg(rps float64, duration time.Duration, warmup int) (time.Duration, int, error) {
 	if rps <= 0 || math.IsNaN(rps) || math.IsInf(rps, 0) {
-		return legResult{}, fmt.Errorf("paced leg needs a positive finite rate, got %v", rps)
+		return 0, 0, fmt.Errorf("paced leg needs a positive finite rate, got %v", rps)
 	}
 	if rps < minLegRPS {
-		return legResult{}, fmt.Errorf(
+		return 0, 0, fmt.Errorf(
 			"paced leg rate %v is too low: the report's milli-rps rows need at least %v rps", rps, minLegRPS)
 	}
 	if duration <= 0 {
-		return legResult{}, fmt.Errorf("paced leg needs a positive duration, got %v", duration)
+		return 0, 0, fmt.Errorf("paced leg needs a positive duration, got %v", duration)
 	}
-	intervalNS := float64(time.Second) / rps
-	if intervalNS < 1 {
-		return legResult{}, fmt.Errorf("paced leg rate %v is too high: its interval is less than 1ns", rps)
+	// Checked before rounding: an interval under 1ns would round up to 1ns.
+	if float64(time.Second)/rps < 1 {
+		return 0, 0, fmt.Errorf("paced leg rate %v is too high: its interval is less than 1ns", rps)
 	}
 	if rps*duration.Seconds() > maxLegRequests {
-		return legResult{}, fmt.Errorf("paced leg at %v rps for %v schedules more than %d requests",
+		return 0, 0, fmt.Errorf("paced leg at %v rps for %v schedules more than %d requests",
 			rps, duration, maxLegRequests)
 	}
-	warmup = max(warmup, 0)
 	measured := measuredRequests(rps, duration)
 	if measured < 1 {
-		return legResult{}, fmt.Errorf(
+		return 0, 0, fmt.Errorf(
 			"paced leg at %v rps for %v schedules no measured request; raise --duration or --target-rps",
 			rps, duration)
 	}
-	interval := legInterval(rps)
 	if warmup > maxLegRequests-measured {
-		return legResult{}, fmt.Errorf(
+		return 0, 0, fmt.Errorf(
 			"paced leg schedules more than %d positions: %d warmup plus %d measured",
 			maxLegRequests, warmup, measured)
 	}
+	interval := legInterval(rps)
 	if int64(warmup+measured) > math.MaxInt64/int64(interval) {
-		return legResult{}, errors.New("paced leg schedule overflows a Duration")
+		return 0, 0, errors.New("paced leg schedule overflows a Duration")
 	}
-	schedule := newPaceSchedule(interval, 0)
+	return interval, measured, nil
+}
 
+// runPacedLeg issues req at rps requests per second. Position i is due at
+// anchor + i×interval, where anchor is the first dispatch. Positions 0 to
+// warmup-1 are warmup; the round(rps × duration) positions after them are
+// measured. A negative warmup counts as zero.
+//
+// A failing request is counted in errs and does not end the leg. A non-nil
+// error is a bad argument, with an empty result, or a context error, with a
+// result that covers the positions reached before the cancel.
+func runPacedLeg(
+	ctx context.Context, rps float64, duration time.Duration, warmup int, seed int64, req queryRequest,
+) (legResult, error) {
+	warmup = max(warmup, 0)
+	interval, measured, err := validateLeg(rps, duration, warmup)
+	if err != nil {
+		return legResult{}, err
+	}
+
+	schedule := newPaceSchedule(interval, 0)
 	leg := newPacedLeg(req, seed, rps, measured)
-	var err error
 	for pos := range warmup + measured {
 		if err = ctx.Err(); err != nil {
 			break
@@ -246,66 +227,63 @@ func runPacedLeg(
 		}
 		leg.launch(pos, due, schedule.clock(), pos >= warmup)
 	}
+
 	leg.wg.Wait()
-	res := leg.result(schedule.dueForPos(warmup))
-	// lags has one entry per measured position reached: measured at a normal
-	// end, fewer after a cancel.
-	res.finish(len(res.lags), interval)
-	return res, err
+	return leg.result(schedule.dueForPos(warmup), interval), err
 }
 
 // launch runs position pos's request on its own goroutine when a slot is free
 // and sheds it otherwise. A measured position records its lag, now minus due,
-// whether or not it is shed; a warmup position records only its shedding and
-// its error. Called from the dispatch goroutine only.
+// whether or not it is shed. Called from the dispatch goroutine only.
 func (l *pacedLeg) launch(pos int, due, now time.Time, measured bool) {
+	phase := &l.warmup
 	if measured {
+		phase = &l.measured
 		l.lags = append(l.lags, max(now.Sub(due), 0))
 	}
 	select {
 	case l.slots <- struct{}{}:
 	default:
-		if measured {
-			l.shed++
-		} else {
-			l.warmupShed++
-		}
+		phase.shed++
 		return
 	}
 	if measured {
 		l.dispatched++
 	}
 	l.wg.Go(func() {
-		s, err := l.req(legRNG(l.seed, pos, l.rps))
+		s, err := l.req(requestRNG(l.rngKey, pos))
 		done := time.Now()
 		<-l.slots
 		switch {
-		case !measured:
-			if err != nil {
-				l.recordWarmupError(err)
-			}
 		case err != nil:
-			l.recordError(err, done)
-		default:
+			l.recordError(phase, err, done)
+		case measured:
 			s.scheduled = done.Sub(due)
 			l.recordSample(s, done)
 		}
 	})
 }
 
-// legRNG derives a request's RNG from the run seed, the position and the rate.
-// Two positions of one leg, or one position of two legs at different rates,
-// draw different sequences.
-func legRNG(seed int64, pos int, rps float64) *rand.Rand {
-	rateBits := math.Float64bits(rps)
-	//nolint:gosec // seed mixing, not cryptography
-	return rand.New(rand.NewPCG(
-		uint64(seed)+uint64(pos)+rateBits*legSeedRateHi,
-		uint64(seed*legSeedStride)+uint64(pos)+rateBits*legSeedRateLo,
-	))
+// legRNGKey mixes the run seed and the leg rate into one key. Legs at
+// different rates get different keys.
+func legRNGKey(seed int64, rps float64) uint64 {
+	return splitmix64(uint64(seed) ^ splitmix64(math.Float64bits(rps))) //nolint:gosec // seed mixing, not cryptography
 }
 
-// measuredRequests is a leg's measured position count, round(rps × duration).
+// requestRNG returns the RNG of position pos in the leg with key. Distinct
+// positions or keys give distinct PCG states, so distinct streams.
+func requestRNG(key uint64, pos int) *rand.Rand {
+	return rand.New(rand.NewPCG(key, splitmix64(key^uint64(pos)))) //nolint:gosec // seed mixing, not cryptography
+}
+
+// splitmix64 is the SplitMix64 finalizer, a bijection on uint64.
+func splitmix64(x uint64) uint64 {
+	x += 0x9e3779b97f4a7c15
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+	return x ^ (x >> 31)
+}
+
 func measuredRequests(rps float64, duration time.Duration) int {
 	return int(math.Round(rps * duration.Seconds()))
 }
