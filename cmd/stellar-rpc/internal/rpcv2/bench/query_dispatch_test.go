@@ -458,7 +458,8 @@ func TestRunPacedLegAbsoluteDueTimes(t *testing.T) {
 }
 
 // TestSpinClockPrecision: with the real clock and no-op requests, the median
-// dispatch lag stays well under a millisecond timer tick.
+// dispatch lag stays well under a millisecond timer tick. A sleep-only wait
+// gives about 500µs on Linux and 60µs on darwin; spinning gives under 1µs.
 func TestSpinClockPrecision(t *testing.T) {
 	req := func(*rand.Rand) (cellSample, error) { return cellSample{items: 1}, nil }
 	res, err := runPacedLeg(t.Context(), spinClock{}, 2000, 200*time.Millisecond, 0, 1, req)
@@ -469,5 +470,5 @@ func TestSpinClockPrecision(t *testing.T) {
 	lags := slices.Clone(res.lags)
 	slices.Sort(lags)
 	t.Logf("lag p50=%v p99=%v max=%v", lags[len(lags)/2], lags[len(lags)*99/100], lags[len(lags)-1])
-	assert.Less(t, lags[len(lags)/2], 100*time.Microsecond, "median dispatch lag")
+	assert.Less(t, lags[len(lags)/2], 20*time.Microsecond, "median dispatch lag")
 }
