@@ -16,6 +16,7 @@ const catalogBaseDirPerm os.FileMode = 0o755 // owner rwx, group/others rx
 // Temp-dir prefixes for scratch catalogs, one per bench.
 const (
 	scratchPrefixIngest = "bench-ingest-catalog-"
+	scratchPrefixQuery  = "bench-query-catalog-"
 )
 
 // openScratchCatalog creates a fresh catalog in a temp dir named prefix* under

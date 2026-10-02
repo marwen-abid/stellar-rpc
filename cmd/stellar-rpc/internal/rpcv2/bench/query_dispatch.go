@@ -32,9 +32,9 @@ const (
 	// stageNone is a sample with no sub-stage row.
 	stageNone sampleStage = iota
 	// stageFound is a txhash sample for the txHashStageFound row.
-	stageFound //nolint:unused // consumed by bench-query/02-read-path, the next PR in this stack
+	stageFound
 	// stageMiss is a txhash sample for the txHashStageMiss row.
-	stageMiss //nolint:unused // consumed by bench-query/02-read-path, the next PR in this stack
+	stageMiss
 )
 
 // queryRequest issues one request. Calls run concurrently on separate
@@ -311,8 +311,6 @@ func measuredRequests(rps float64, duration time.Duration) int {
 }
 
 // timed runs fn and returns a sample with fn's run time as service.
-//
-//nolint:unparam // stage is set by the txhash body in bench-query/02-read-path, the next PR in this stack
 func timed(stage sampleStage, fn func() (int, error)) (cellSample, error) {
 	start := time.Now()
 	items, err := fn()
