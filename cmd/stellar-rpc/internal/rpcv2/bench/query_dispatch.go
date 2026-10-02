@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -93,10 +94,50 @@ type legResult struct {
 	drain time.Duration
 }
 
+// legClock is the dispatcher's time source.
+type legClock interface {
+	now() time.Time
+	// waitUntil returns at or after t, or with ctx.Err() once ctx is done. A
+	// past t still returns ctx.Err() if ctx is done.
+	waitUntil(ctx context.Context, t time.Time) error
+}
+
+// spinWindow is how long before a due time spinClock stops sleeping and spins.
+// On Linux an idle Go runtime waits for timers in epoll_wait, which takes a
+// millisecond timeout, so a sleep wakes up to about 1.5ms late. The cost: the
+// dispatcher keeps one P busy for up to spinWindow before each due time, so
+// above about 500 rps it uses one core all the time.
+const spinWindow = 2 * time.Millisecond
+
+// spinClock is the real legClock. It sleeps until spinWindow before t, then
+// spins on time.Now.
+type spinClock struct{}
+
+func (spinClock) now() time.Time { return time.Now() }
+
+func (spinClock) waitUntil(ctx context.Context, t time.Time) error {
+	if d := time.Until(t) - spinWindow; d > 0 {
+		if err := contextSleep(ctx, d); err != nil {
+			return err
+		}
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !time.Now().Before(t) {
+			return nil
+		}
+		// Lets request goroutines on this P run.
+		runtime.Gosched()
+	}
+}
+
 // pacedLeg is one leg's dispatch state.
 type pacedLeg struct {
 	legRecord
 
+	clock  legClock
 	req    queryRequest
 	rngKey uint64
 	wg     sync.WaitGroup
@@ -107,8 +148,9 @@ type pacedLeg struct {
 	lastDone time.Time
 }
 
-func newPacedLeg(req queryRequest, seed int64, rps float64, measured int) *pacedLeg {
+func newPacedLeg(clock legClock, req queryRequest, seed int64, rps float64, measured int) *pacedLeg {
 	return &pacedLeg{
+		clock:  clock,
 		req:    req,
 		rngKey: legRNGKey(seed, rps),
 		slots:  make(chan struct{}, maxInFlight),
@@ -202,7 +244,7 @@ func validateLeg(rps float64, duration time.Duration, warmup int) (time.Duration
 }
 
 // runPacedLeg issues req at rps requests per second. Position i is due at
-// anchor + i×interval, where anchor is the first dispatch. Positions 0 to
+// anchor + i×interval, where anchor is clock.now() at the start. Positions 0 to
 // warmup-1 are warmup; the round(rps × duration) positions after them are
 // measured. A negative warmup counts as zero.
 //
@@ -210,7 +252,8 @@ func validateLeg(rps float64, duration time.Duration, warmup int) (time.Duration
 // error is a bad argument, with an empty result, or a context error, with a
 // result that covers the positions reached before the cancel.
 func runPacedLeg(
-	ctx context.Context, rps float64, duration time.Duration, warmup int, seed int64, req queryRequest,
+	ctx context.Context, clock legClock, rps float64, duration time.Duration, warmup int, seed int64,
+	req queryRequest,
 ) (legResult, error) {
 	warmup = max(warmup, 0)
 	interval, measured, err := validateLeg(rps, duration, warmup)
@@ -218,21 +261,18 @@ func runPacedLeg(
 		return legResult{}, err
 	}
 
-	schedule := newPaceSchedule(interval, 0)
-	leg := newPacedLeg(req, seed, rps, measured)
+	leg := newPacedLeg(clock, req, seed, rps, measured)
+	anchor := clock.now()
+	due := func(pos int) time.Time { return anchor.Add(time.Duration(pos) * interval) }
 	for pos := range warmup + measured {
-		if err = ctx.Err(); err != nil {
+		if err = clock.waitUntil(ctx, due(pos)); err != nil {
 			break
 		}
-		due := schedule.dueForPos(pos)
-		if err = contextSleep(ctx, due.Sub(schedule.clock())); err != nil {
-			break
-		}
-		leg.launch(pos, due, schedule.clock(), pos >= warmup)
+		leg.launch(pos, due(pos), clock.now(), pos >= warmup)
 	}
 
 	leg.wg.Wait()
-	return leg.result(schedule.dueForPos(warmup), interval), err
+	return leg.result(due(warmup), interval), err
 }
 
 // launch runs position pos's request on its own goroutine when a slot is free
@@ -253,7 +293,7 @@ func (l *pacedLeg) launch(pos int, due, now time.Time, measured bool) {
 	phase.dispatched++
 	l.wg.Go(func() {
 		s, err := l.req(requestRNG(l.rngKey, pos))
-		done := time.Now()
+		done := l.clock.now()
 		<-l.slots
 		switch {
 		case err != nil:

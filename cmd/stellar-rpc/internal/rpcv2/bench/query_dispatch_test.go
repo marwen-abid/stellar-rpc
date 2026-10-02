@@ -36,7 +36,7 @@ func (c *countingRequest) run(*rand.Rand) (cellSample, error) {
 func TestRunPacedLegMeasuredCount(t *testing.T) {
 	const rps = 200.0
 	fake := &countingRequest{}
-	res, err := runPacedLeg(t.Context(), rps, 100*time.Millisecond, 5, 42, fake.run)
+	res, err := runPacedLeg(t.Context(), spinClock{}, rps, 100*time.Millisecond, 5, 42, fake.run)
 	require.NoError(t, err)
 
 	assert.Equal(t, 20, res.measured.dispatched)
@@ -77,7 +77,7 @@ func (d *drawRecorder) run(rng *rand.Rand) (cellSample, error) {
 // rates, draw distinct values.
 func TestRunPacedLegRNGIndependence(t *testing.T) {
 	first := &drawRecorder{}
-	_, err := runPacedLeg(t.Context(), 500, 40*time.Millisecond, 0, 7, first.run)
+	_, err := runPacedLeg(t.Context(), spinClock{}, 500, 40*time.Millisecond, 0, 7, first.run)
 	require.NoError(t, err)
 	require.Len(t, first.draws, 20)
 
@@ -88,7 +88,7 @@ func TestRunPacedLegRNGIndependence(t *testing.T) {
 	}
 
 	second := &drawRecorder{}
-	_, err = runPacedLeg(t.Context(), 250, 80*time.Millisecond, 0, 7, second.run)
+	_, err = runPacedLeg(t.Context(), spinClock{}, 250, 80*time.Millisecond, 0, 7, second.run)
 	require.NoError(t, err)
 	require.Len(t, second.draws, 20)
 	for _, v := range second.draws {
@@ -122,7 +122,7 @@ func TestRunPacedLegSheds(t *testing.T) {
 	timer := time.AfterFunc(2*time.Second, func() { close(fake.release) })
 	defer timer.Stop()
 
-	res, err := runPacedLeg(t.Context(), 100000, 10*time.Millisecond, 0, 3, fake.run)
+	res, err := runPacedLeg(t.Context(), spinClock{}, 100000, 10*time.Millisecond, 0, 3, fake.run)
 	require.NoError(t, err)
 
 	assert.Equal(t, maxInFlight, res.measured.dispatched)
@@ -149,7 +149,7 @@ func TestRunPacedLegCountsErrors(t *testing.T) {
 		return timed(stageNone, func() (int, error) { return 1, nil })
 	}
 
-	res, err := runPacedLeg(t.Context(), rps, 100*time.Millisecond, 0, 11, req)
+	res, err := runPacedLeg(t.Context(), spinClock{}, rps, 100*time.Millisecond, 0, 11, req)
 	require.NoError(t, err)
 
 	assert.Equal(t, 20, res.measured.dispatched)
@@ -173,7 +173,7 @@ func TestRunPacedLegRoundsTheInterval(t *testing.T) {
 	assert.Equal(t, 142857143*time.Nanosecond, legInterval(7))
 
 	req := func(*rand.Rand) (cellSample, error) { return cellSample{items: 1}, nil }
-	res, err := runPacedLeg(t.Context(), 7, 150*time.Millisecond, 0, 1, req)
+	res, err := runPacedLeg(t.Context(), spinClock{}, 7, 150*time.Millisecond, 0, 1, req)
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.positions)
 	assert.Equal(t, 142857143*time.Nanosecond, res.arrival)
@@ -196,7 +196,7 @@ func TestRunPacedLegContextCancel(t *testing.T) {
 	defer timer.Stop()
 
 	start := time.Now()
-	res, err := runPacedLeg(ctx, 2, 10*time.Second, 0, 5, req)
+	res, err := runPacedLeg(ctx, spinClock{}, 2, 10*time.Second, 0, 5, req)
 	elapsed := time.Since(start)
 
 	require.ErrorIs(t, err, context.Canceled)
@@ -224,7 +224,7 @@ func TestRunPacedLegLagStaysSmall(t *testing.T) {
 		})
 	}
 
-	res, err := runPacedLeg(t.Context(), 1000, 50*time.Millisecond, 0, 13, req)
+	res, err := runPacedLeg(t.Context(), spinClock{}, 1000, 50*time.Millisecond, 0, 13, req)
 	require.NoError(t, err)
 
 	assert.Equal(t, 50, res.measured.dispatched)
@@ -248,7 +248,7 @@ func TestLaunchPacedRequestChargesLateDispatch(t *testing.T) {
 		return timed(stageNone, func() (int, error) { return 1, nil })
 	}
 
-	leg := newPacedLeg(req, 1, 1, 1)
+	leg := newPacedLeg(spinClock{}, req, 1, 1, 1)
 	due := time.Now().Add(-late)
 	leg.launch(0, due, time.Now(), true)
 	leg.wg.Wait()
@@ -268,21 +268,21 @@ func TestRunPacedLegRejectsBadArguments(t *testing.T) {
 	req := func(*rand.Rand) (cellSample, error) {
 		return timed(stageNone, func() (int, error) { return 1, nil })
 	}
-	_, err := runPacedLeg(t.Context(), 0, time.Second, 0, 1, req)
+	_, err := runPacedLeg(t.Context(), spinClock{}, 0, time.Second, 0, 1, req)
 	assert.Error(t, err)
-	_, err = runPacedLeg(t.Context(), 10, 0, 0, 1, req)
+	_, err = runPacedLeg(t.Context(), spinClock{}, 10, 0, 0, 1, req)
 	assert.Error(t, err)
 	// 1e-12 rps is below minLegRPS: the report's milli-rps rows would store zero.
-	_, err = runPacedLeg(t.Context(), 1e-12, time.Second, 0, 1, req)
+	_, err = runPacedLeg(t.Context(), spinClock{}, 1e-12, time.Second, 0, 1, req)
 	assert.ErrorContains(t, err, "too low")
 	// 1e6 rps over a century is more positions than the leg ceiling allows.
-	_, err = runPacedLeg(t.Context(), 1e6, 100*365*24*time.Hour, 0, 1, req)
+	_, err = runPacedLeg(t.Context(), spinClock{}, 1e6, 100*365*24*time.Hour, 0, 1, req)
 	assert.ErrorContains(t, err, "more than")
 	// 0.01 rps for a second rounds to no measured position at all.
-	_, err = runPacedLeg(t.Context(), 0.01, time.Second, 0, 1, req)
+	_, err = runPacedLeg(t.Context(), spinClock{}, 0.01, time.Second, 0, 1, req)
 	assert.ErrorContains(t, err, "no measured request")
 	// A warmup at the leg ceiling leaves no room for a measured position.
-	_, err = runPacedLeg(t.Context(), 10, time.Second, maxLegRequests, 1, req)
+	_, err = runPacedLeg(t.Context(), spinClock{}, 10, time.Second, maxLegRequests, 1, req)
 	assert.ErrorContains(t, err, "warmup plus")
 }
 
@@ -301,7 +301,7 @@ func TestRunPacedLegRejectsScheduleOverflow(t *testing.T) {
 		{"schedule window", 0.001, 1000 * time.Second, 10_000_000, "schedule overflows"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := runPacedLeg(t.Context(), tc.rps, tc.duration, tc.warmup, 1, nil)
+			res, err := runPacedLeg(t.Context(), spinClock{}, tc.rps, tc.duration, tc.warmup, 1, nil)
 			require.ErrorContains(t, err, tc.want)
 			assert.Equal(t, legResult{}, res)
 		})
@@ -312,7 +312,7 @@ func TestRunPacedLegNanosecondInterval(t *testing.T) {
 	for _, rps := range []float64{math.Nextafter(1e9, 0), 1e9} {
 		t.Run(formatRPS(rps), func(t *testing.T) {
 			req := func(*rand.Rand) (cellSample, error) { return cellSample{items: 1}, nil }
-			res, err := runPacedLeg(t.Context(), rps, time.Nanosecond, 0, 1, req)
+			res, err := runPacedLeg(t.Context(), spinClock{}, rps, time.Nanosecond, 0, 1, req)
 			require.NoError(t, err)
 			assert.Equal(t, 1, res.positions)
 			assert.Equal(t, 1, res.measured.dispatched)
@@ -341,7 +341,7 @@ func TestPacedLegAccountingWindows(t *testing.T) {
 		{"all shed", 0, 0, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			leg := newPacedLeg(nil, 1, 100, 2)
+			leg := newPacedLeg(spinClock{}, nil, 1, 100, 2)
 			if tc.success > 0 {
 				leg.recordSample(cellSample{}, firstDue.Add(tc.success))
 				leg.lags = append(leg.lags, 0)
@@ -371,4 +371,103 @@ func TestPacedLegAccountingWindows(t *testing.T) {
 			assert.Equal(t, tc.drain, res.drain)
 		})
 	}
+}
+
+// latenessClock is a fake legClock. Its k-th waitUntil(t) sets the time to
+// t + lateness[k].
+type latenessClock struct {
+	mu       sync.Mutex
+	t        time.Time
+	lateness []time.Duration
+	waits    []time.Time
+}
+
+func (c *latenessClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *latenessClock) waitUntil(_ context.Context, t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = t.Add(c.lateness[len(c.waits)])
+	c.waits = append(c.waits, t)
+	return nil
+}
+
+// TestRunPacedLegAbsoluteDueTimes: position i is due at anchor + i×interval,
+// whatever the lateness of earlier positions. Every request completes at the
+// final fake time, so each sample's scheduled is that time minus its due time.
+func TestRunPacedLegAbsoluteDueTimes(t *testing.T) {
+	const (
+		rps      = 1000
+		interval = time.Millisecond
+		warmup   = 3
+		measured = 6
+		total    = warmup + measured
+	)
+	anchor := time.Unix(100, 0)
+	clock := &latenessClock{
+		t: anchor,
+		lateness: []time.Duration{
+			0, 300 * time.Microsecond, 0,
+			50 * time.Microsecond, 0, 700 * time.Microsecond, 10 * time.Microsecond, 0, 250 * time.Microsecond,
+		},
+	}
+	due := func(pos int) time.Time { return anchor.Add(time.Duration(pos) * interval) }
+
+	// The request of the last position releases all of them, so every request
+	// reads the time after the last waitUntil.
+	release := make(chan struct{})
+	var calls atomic.Int64
+	req := func(*rand.Rand) (cellSample, error) {
+		if calls.Add(1) == total {
+			close(release)
+		}
+		<-release
+		return cellSample{items: 1}, nil
+	}
+
+	res, err := runPacedLeg(t.Context(), clock, rps, measured*interval, warmup, 1, req)
+	require.NoError(t, err)
+
+	wantWaits := make([]time.Time, total)
+	for pos := range total {
+		wantWaits[pos] = due(pos)
+	}
+	assert.Equal(t, wantWaits, clock.waits)
+
+	done := due(total - 1).Add(clock.lateness[total-1])
+	wantScheduled := make([]time.Duration, 0, measured)
+	for pos := warmup; pos < total; pos++ {
+		wantScheduled = append(wantScheduled, done.Sub(due(pos)))
+	}
+	gotScheduled := make([]time.Duration, 0, len(res.samples))
+	for _, s := range res.samples {
+		gotScheduled = append(gotScheduled, s.scheduled)
+	}
+	slices.Sort(wantScheduled)
+	slices.Sort(gotScheduled)
+
+	assert.Equal(t, clock.lateness[warmup:], res.lags)
+	assert.Equal(t, wantScheduled, gotScheduled)
+	assert.Equal(t, measured, res.positions)
+	assert.Equal(t, measured*interval, res.arrival)
+	assert.Equal(t, done.Sub(due(warmup)), res.wall)
+}
+
+// TestSpinClockPrecision: with the real clock and no-op requests, the median
+// dispatch lag stays well under a millisecond timer tick.
+func TestSpinClockPrecision(t *testing.T) {
+	req := func(*rand.Rand) (cellSample, error) { return cellSample{items: 1}, nil }
+	res, err := runPacedLeg(t.Context(), spinClock{}, 2000, 200*time.Millisecond, 0, 1, req)
+	require.NoError(t, err)
+	require.Len(t, res.lags, 400)
+	assert.Zero(t, res.measured.shed)
+
+	lags := slices.Clone(res.lags)
+	slices.Sort(lags)
+	t.Logf("lag p50=%v p99=%v max=%v", lags[len(lags)/2], lags[len(lags)*99/100], lags[len(lags)-1])
+	assert.Less(t, lags[len(lags)/2], 100*time.Microsecond, "median dispatch lag")
 }
