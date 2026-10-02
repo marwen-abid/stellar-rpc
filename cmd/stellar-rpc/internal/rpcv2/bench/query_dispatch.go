@@ -44,28 +44,32 @@ const maxInFlight = 512
 // milli-rps rows.
 const minLegRPS = 1.0 / milliPerUnit
 
+// maxLegRPS is the highest leg rate: one request per nanosecond.
+const maxLegRPS = float64(time.Second)
+
 // maxLegRequests caps a leg's measured positions, about 2.7 hours at 10k rps.
 // At the cap the leg holds about 4 GB of samples and lags until it ends, and
 // the sink about 6 GB (8 GB for txhash) until the run reports. The sink share
 // adds up over types × rates.
 const maxLegRequests = 100_000_000
 
-// phaseStats counts one phase's failures: shed positions and failed requests.
-// firstErr is nil when errs is zero.
+// phaseStats counts one phase's requests. Every position is dispatched or
+// shed; errs counts the dispatched requests that failed, and firstErr is nil
+// when errs is zero.
 type phaseStats struct {
-	shed     int
-	errs     int
-	firstErr error
+	dispatched int
+	shed       int
+	errs       int
+	firstErr   error
 }
 
 // legRecord holds what a leg records as it runs. The dispatch goroutine writes
-// lags, dispatched and each phase's shed without the lock. The request
+// lags and each phase's dispatched and shed without the lock. The request
 // goroutines write samples and each phase's errs and firstErr under
 // pacedLeg.mu.
 type legRecord struct {
-	lags       []time.Duration // dispatch lag per measured position, shed ones included
-	dispatched int             // measured requests that ran
-	samples    []cellSample    // measured requests that succeeded
+	lags    []time.Duration // dispatch lag per measured position, shed ones included
+	samples []cellSample    // measured requests that succeeded
 
 	warmup   phaseStats
 	measured phaseStats
@@ -169,12 +173,11 @@ func validateLeg(rps float64, duration time.Duration, warmup int) (time.Duration
 		return 0, 0, fmt.Errorf(
 			"paced leg rate %v is too low: the report's milli-rps rows need at least %v rps", rps, minLegRPS)
 	}
+	if rps > maxLegRPS {
+		return 0, 0, fmt.Errorf("paced leg rate %v is too high: its interval is less than 1ns", rps)
+	}
 	if duration <= 0 {
 		return 0, 0, fmt.Errorf("paced leg needs a positive duration, got %v", duration)
-	}
-	// Checked before rounding: an interval under 1ns would round up to 1ns.
-	if float64(time.Second)/rps < 1 {
-		return 0, 0, fmt.Errorf("paced leg rate %v is too high: its interval is less than 1ns", rps)
 	}
 	if rps*duration.Seconds() > maxLegRequests {
 		return 0, 0, fmt.Errorf("paced leg at %v rps for %v schedules more than %d requests",
@@ -247,9 +250,7 @@ func (l *pacedLeg) launch(pos int, due, now time.Time, measured bool) {
 		phase.shed++
 		return
 	}
-	if measured {
-		l.dispatched++
-	}
+	phase.dispatched++
 	l.wg.Go(func() {
 		s, err := l.req(requestRNG(l.rngKey, pos))
 		done := time.Now()
