@@ -21,7 +21,7 @@ func (p *profileFlags) bind(cmd *cobra.Command) {
 	fs := cmd.Flags()
 	fs.StringVar(&p.cpuProfile, "cpuprofile", "", "write a Go CPU profile to PATH")
 	fs.StringVar(&p.memProfile, "memprofile", "",
-		"write a Go allocation profile to PATH (read it with `go tool pprof -alloc_space`)")
+		"write a Go allocation profile to PATH (read it with 'go tool pprof -alloc_space')")
 }
 
 // around runs fn under the optional profiles: the CPU profile spans the whole
