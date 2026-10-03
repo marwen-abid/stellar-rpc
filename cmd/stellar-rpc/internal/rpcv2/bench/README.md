@@ -5,6 +5,13 @@ This package has two benchmark commands:
 - `bench-ingest` writes a storage dataset and measures ingestion.
 - `bench-query` reads that dataset and measures read latency.
 
+`bench-query` has one subcommand for each storage tier:
+
+- `bench-query cold` reads frozen artifacts.
+- `bench-query hot` reads a hot chunk database.
+
+The tier names do not describe the state of the OS page cache.
+
 This document defines the terms and the formulas of `bench-query`. It also
 defines `run.json`, which both commands write.
 
@@ -183,6 +190,8 @@ count = n
 
 - Zero durations stay in the distribution.
 - When `n` is 100 or less, `p99` is equal to `max`.
+- The log shows a warning for each `latency` row that has fewer than 100
+  samples.
 
 ## 7. Output files
 
@@ -190,6 +199,11 @@ count = n
 `scenarios.csv` when at least one scenario has a result. If `--out` already
 contains a `.csv` file, the command stops before it changes `--out`. This
 prevents a mix of results from two runs.
+
+If a measured request fails, the run fails after the command adds its scenario
+to the report. If the run fails or you cancel it, the command writes the
+scenarios that have a result, and the log marks the report as PARTIAL. A
+scenario that you cancel before its first measured iteration has no rows.
 
 ### 7.1 `latency.csv`
 
@@ -223,7 +237,7 @@ One row for each scenario, in run order.
 | `completion_rps` | `succeeded / elapsed`. |
 | `schedule_ns`, `elapsed_ns`, `overrun_ns` | The time windows, in nanoseconds. |
 | `process_cpu_ns` | The process CPU time of the measured phase, in nanoseconds. |
-| `page_cache_evict_ns` | The time of the page-cache eviction before the scenario. Empty when no eviction occurred. |
+| `page_cache_evict_ns` | The time of the page-cache eviction before the scenario. Empty when no eviction occurred. See section 10. |
 
 ### 7.3 `run.json`
 
@@ -248,9 +262,114 @@ The command writes `run.json` before the run starts, with `status` set to
 | `status` | `running`, `ok` or `failed`. |
 | `error` | The error message of a failed run. Absent when the run succeeded. |
 
-## 8. Known limits
+`bench-query` writes these keys in `settings` and `setupNs`:
 
-### 8.1 Timer precision
+| Key | Definition |
+|---|---|
+| `settings.cacheScenario` | `cold-start`, `warm-run` or `existing-cache`. See section 10. |
+| `settings.pageCacheEviction` | `off`, `requested` or `unsupported-on-this-platform`. See section 10. |
+| `settings.txhashPoolHashes` | The number of hashes in the transaction pool. See section 9.1. |
+| `settings.txhashPoolLedgers` | The number of ledgers that supplied a hash to the pool. |
+| `settings.eventsPool` | `derived` or `unfiltered`. See section 9.2. |
+| `settings.fixedReadRange` | The types whose span covers all ledgers of the dataset, for example `ledgers,txpage`. Absent when no span covers them. |
+| `setupNs.storeOpen` | The time to open the dataset, before the first scenario. |
+
+## 8. Datasets
+
+### 8.1 Scratch catalog
+
+Each `bench-query` run creates a scratch catalog in a `bench-query-catalog-*`
+directory under the dataset root (`--cold-dir` or `--hot-dir`). Use
+`--catalog-dir` to put the catalog in a different directory. A read-only
+dataset root needs this flag. The run removes the directory when it ends. If
+the run stops before it ends, the directory stays. Remove it before you
+measure again.
+
+### 8.2 Hot tier database
+
+`bench-query hot` opens the chunk database read-write, as the daemon opens a
+resumed chunk. The open replays and flushes the write-ahead log, and it can
+start compaction. Thus, after a run, the state on the disk is different from
+the state that ingest left. A second run on the same `--hot-dir` measures a
+compacted database. The open takes an exclusive lock, so the run cannot use
+the directory of a running daemon.
+
+## 9. Query types
+
+All requests use the storage read paths through `query.ReadView`. The
+measurement does not include RPC handlers, response serialization or network
+work.
+
+| Type | Request | `items` |
+|---|---|---|
+| `ledgers` | One `ReadView.ScanLedgers` over `--ledgers-span` ledgers, from a random start ledger. This is the read of `getLedgers`. | Ledgers. |
+| `txpage` | A scan of `--txpage-span` ledgers that makes the transaction views, envelopes included, up to `--txpage-limit` transactions. This is the read of `getTransactions`. It does not make or serialize the full RPC response. | Transactions. |
+| `txhash` | One by-hash lookup of a hash from the transaction pool, through the tx-hash indexes. This is the read of `getTransaction`. | 1 if found, 0 if not found. |
+| `events` | One page of `--events-limit` events or fewer, from a random start ledger to the last ledger of the dataset, with a filter set from the events pool. This is the read of `getEvents`. | Events. |
+
+If `--ledgers-span` or `--txpage-span` is equal to or more than the number of
+ledgers in the dataset, each request of that type reads the same ledgers. The
+log then shows a warning, and `settings.fixedReadRange` lists those types.
+
+An `events` request scans one page window of 10,000 ledgers or fewer. If the
+filter matches no event in that window, the request returns an empty page. The
+request succeeds with zero items. Before you read the `events` percentiles as
+filtered-read latency, examine `items` in `latency.csv`.
+
+### 9.1 Transaction pool
+
+The transaction pool holds the hashes that `txhash` looks up. The run builds
+it before the first `txhash` scenario.
+
+- `--txhash-pool-size` sets the maximum number of hashes. The default is 512.
+  The value must be 1 to 1,000,000.
+- The sampler reads random ledgers, and takes 16 hashes or fewer from each
+  ledger. Each chunk supplies its share of the pool.
+- `--seed` sets the draws, so the same seed and dataset give the same pool.
+- The pool can be smaller than the maximum. The log then shows a warning. A
+  pool with no hashes is an error.
+
+`settings.txhashPoolHashes` gives the pool size, and
+`settings.txhashPoolLedgers` gives the number of ledgers that supplied a hash.
+
+`--not-found-fraction` sets the fraction of `txhash` lookups that ask for a
+hash that is not in the dataset. The default is 0.12. The value must be 0 to 1.
+Such a hash is 32 random bytes. A not-found lookup probes every hot index and
+then every cold window index, so it is the slowest lookup. `latency.csv` shows
+these lookups with the outcome `not_found`.
+
+### 9.2 Events pool
+
+The events pool holds the filter sets that `events` uses. The run scans up to
+20,000 stored events of the dataset to make it. The pool holds the unfiltered
+read, the contracts with the most events, and the most frequent pair of
+contract and first topic. `settings.eventsPool` is `derived` when the scan
+found a filter term, and `unfiltered` when the pool holds only the unfiltered
+read.
+
+## 10. Cache controls
+
+Both tiers accept `--warmup`. The default is 0 for `cold` and 20 for `hot`.
+
+`bench-query cold` also accepts `--evict-page-cache`. The default is true. On
+Linux, it requests OS page-cache eviction of the dataset files before each
+scenario. The eviction occurs before the warmup. The pool build occurs before
+both, and it can fill the caches. `bench-query hot` does not request
+eviction.
+
+`settings.cacheScenario` records the requested controls:
+
+- `cold-start`: eviction is requested and there is no warmup. This value also
+  applies on a platform that cannot evict.
+- `warm-run`: the warmup is more than 0, with or without eviction.
+- `existing-cache`: there is no eviction and no warmup.
+
+`settings.pageCacheEviction` is `off`, `requested` (Linux) or
+`unsupported-on-this-platform`.
+
+## 11. Known limits
+
+### 11.1 Timer precision
 
 The generator waits for each due time on a Go timer. A Go timer can end its
 wait up to about 1 ms late. In our measurements, the delay was about 0.5 ms at
@@ -259,14 +378,14 @@ p50 and about 1.1 ms at p99.
 - This delay adds to `start_delay` and `latency_from_due`.
 - This delay does not change `latency`.
 
-### 8.2 Bursts above about 1,000 rps
+### 11.2 Bursts above about 1,000 rps
 
 Above about 1,000 rps, the interval is shorter than the timer delay. After a
 late wait, the generator starts all overdue iterations together. The average
 rate stays correct, but the requests arrive in small bursts. At 10,000 rps, a
 burst has about 5 to 10 requests.
 
-### 8.3 Shared process
+### 11.3 Shared process
 
 The generator and the store run in the same process. They use the same CPUs
 and the same Go scheduler. `process_cpu_ns`, `gomaxprocs` and `numCpu` show

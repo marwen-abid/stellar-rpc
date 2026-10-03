@@ -357,8 +357,6 @@ func splitmix64(x uint64) uint64 {
 }
 
 // timed runs fn and returns its run time as latency.
-//
-//nolint:unparam // outcome is set by the txhash body in bench-query/02-read-path, the next PR in this stack
 func timed(outcome lookupOutcome, fn func() (int, error)) (requestTiming, error) {
 	start := time.Now()
 	items, err := fn()
