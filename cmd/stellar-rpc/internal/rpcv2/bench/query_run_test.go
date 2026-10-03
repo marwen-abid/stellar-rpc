@@ -1,0 +1,339 @@
+package bench
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"math/rand/v2"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	supportlog "github.com/stellar/go-stellar-sdk/support/log"
+
+	"github.com/stellar/stellar-rpc/cmd/stellar-rpc/internal/rpcv2/chunk"
+)
+
+func TestScenarioSeedIsDistinctPerType(t *testing.T) {
+	seen := map[int64]string{}
+	for _, qtype := range allQueryTypes {
+		seed := scenarioSeed(defaultSeed, qtype)
+		if prev, dup := seen[seed]; dup {
+			t.Fatalf("%s and %s share scenario seed %d", prev, qtype, seed)
+		}
+		seen[seed] = qtype
+	}
+	assert.Len(t, seen, len(allQueryTypes))
+}
+
+// capturingLogger returns an Info-level logger that writes into the buffer.
+func capturingLogger() (*supportlog.Entry, *bytes.Buffer) {
+	var output bytes.Buffer
+	logger := supportlog.New()
+	logger.SetLevel(supportlog.InfoLevel)
+	logger.SetOutput(&output)
+	return logger, &output
+}
+
+// fakeScenarioClock is a scenarioClock whose waitUntil returns at once and
+// moves the time to its target. Each now advances the time by a microsecond,
+// so a request ends after its due time. If cancel is set, the cancelAt-th
+// waitUntil (from zero) calls it, so the generator sees the cancel before that
+// iteration.
+type fakeScenarioClock struct {
+	cancel   context.CancelFunc
+	cancelAt int
+
+	mu    sync.Mutex
+	t     time.Time
+	waits int
+}
+
+func (c *fakeScenarioClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(time.Microsecond)
+	return c.t
+}
+
+func (c *fakeScenarioClock) waitUntil(ctx context.Context, t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancel != nil && c.waits == c.cancelAt {
+		c.cancel()
+	}
+	c.waits++
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if t.After(c.t) {
+		c.t = t
+	}
+	return nil
+}
+
+func testQueryRun(logger *supportlog.Entry, ds *queryDataset, p queryPlan, clock scenarioClock) *queryRun {
+	return &queryRun{logger: logger, ds: ds, plan: p, report: &queryReport{}, clock: clock}
+}
+
+// A measured request failure fails the run, and the scenario's counts and
+// successful timings stay in the report.
+func TestQueryScenarioKeepsRequestFailures(t *testing.T) {
+	for _, allFailed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "partial-success", true: "all-failed"}[allFailed], func(t *testing.T) {
+			var calls atomic.Int32
+			req := func(context.Context, *rand.Rand) (requestTiming, error) {
+				if calls.Add(1)%2 == 0 || allFailed {
+					return requestTiming{}, errors.New("read failed")
+				}
+				return requestTiming{latency: time.Microsecond, items: 1}, nil
+			}
+			logger, _ := capturingLogger()
+			run := testQueryRun(logger, nil, queryPlan{Duration: 4 * time.Millisecond}, &fakeScenarioClock{})
+			err := run.scenario(context.Background(), queryTypeLedgers, 1000, req)
+			require.ErrorContains(t, err, "requests failed")
+			require.ErrorContains(t, err, "read failed")
+
+			failed, succeeded := 2, 2
+			if allFailed {
+				failed, succeeded = 4, 0
+			}
+			require.Len(t, run.report.scenarios, 1)
+			res := run.report.scenarios[0].result
+			assert.Equal(t, 4, res.planned)
+			assert.Equal(t, 4, res.measured.started)
+			assert.Equal(t, failed, res.measured.failed)
+			assert.Equal(t, succeeded, res.succeeded())
+
+			out := t.TempDir()
+			_, err = run.report.write(out)
+			require.NoError(t, err)
+			_, rows := readCSVTable(t, filepath.Join(out, queryScenariosFile))
+			require.Len(t, rows, 1)
+			assert.Equal(t, "4", rows[0]["planned"])
+			assert.Empty(t, rows[0]["page_cache_evict_ns"], "no eviction was requested")
+		})
+	}
+}
+
+// A cancel keeps the measured iterations it reached: the scenario is added,
+// the log marks it PARTIAL, and the context error returns. A cancel during
+// warmup adds nothing. A cancel during the last request still ends the
+// scenario PARTIAL, with every iteration reached.
+func TestQueryScenarioCanceled(t *testing.T) {
+	const rps = 100
+	for _, tc := range []struct {
+		name      string
+		warmup    int
+		clockWait int   // the waitUntil call that cancels, or -1
+		reqCall   int32 // the request call that cancels, or 0
+		planned   int   // measured iterations reached; 0 means none
+	}{
+		{"measured", 0, 3, 0, 3},
+		{"warmup", 50, 2, 0, 0},
+		{"during the last request", 0, -1, 100, 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var calls atomic.Int32
+			req := func(context.Context, *rand.Rand) (requestTiming, error) {
+				if calls.Add(1) == tc.reqCall {
+					cancel()
+				}
+				return requestTiming{latency: time.Microsecond, items: 1}, nil
+			}
+			clock := &fakeScenarioClock{cancel: cancel, cancelAt: tc.clockWait}
+			logger, output := capturingLogger()
+			p := queryPlan{Duration: time.Second, Warmup: tc.warmup}
+			run := testQueryRun(logger, nil, p, clock)
+			err := run.scenario(ctx, queryTypeLedgers, rps, req)
+			require.ErrorIs(t, err, context.Canceled)
+			if tc.planned == 0 {
+				assert.Contains(t, output.String(), "canceled before its first measured iteration")
+				assert.Empty(t, run.report.scenarios)
+				return
+			}
+			require.Len(t, run.report.scenarios, 1)
+			res := run.report.scenarios[0].result
+			assert.Equal(t, tc.planned, res.planned)
+			assert.Equal(t, tc.planned, res.succeeded(), "every reached iteration succeeded")
+			assert.Contains(t, output.String(), "is PARTIAL: canceled after")
+		})
+	}
+}
+
+// An eviction before a scenario is timed into its page_cache_evict_ns column.
+// Off Linux nothing is evicted and the column stays empty.
+func TestQueryScenarioEviction(t *testing.T) {
+	artifact := filepath.Join(t.TempDir(), "ledgers.pack")
+	require.NoError(t, os.WriteFile(artifact, []byte("ledgers"), 0o600))
+	ds := &queryDataset{EvictPaths: []string{artifact}}
+	req := func(context.Context, *rand.Rand) (requestTiming, error) {
+		return requestTiming{latency: time.Microsecond, items: 1}, nil
+	}
+	logger, _ := capturingLogger()
+	p := queryPlan{Duration: 4 * time.Millisecond, Evict: true}
+	run := testQueryRun(logger, ds, p, &fakeScenarioClock{})
+	require.NoError(t, run.scenario(context.Background(), queryTypeLedgers, 1000, req))
+
+	out := t.TempDir()
+	_, err := run.report.write(out)
+	require.NoError(t, err)
+	_, rows := readCSVTable(t, filepath.Join(out, queryScenariosFile))
+	require.Len(t, rows, 1)
+	want := ""
+	if evictSupported {
+		want = "1000" // two fake-clock reads, a microsecond apart
+	}
+	assert.Equal(t, want, rows[0]["page_cache_evict_ns"])
+}
+
+// Each latency row under minScenarioSamples warns, whatever its outcome.
+func TestWarnThinSamples(t *testing.T) {
+	sc := scenarioReport{queryType: queryTypeTxHash, targetRPS: 2}
+	for i := range minScenarioSamples + 10 {
+		outcome := outcomeFound
+		if i < 10 {
+			outcome = outcomeNotFound
+		}
+		sc.result.timings = append(sc.result.timings, requestTiming{latency: time.Millisecond, outcome: outcome})
+	}
+	logger, output := capturingLogger()
+	warnThinSamples(logger, sc)
+	assert.Contains(t, output.String(), "latency outcome=not_found has 10 samples, fewer than 100")
+	assert.NotContains(t, output.String(), "outcome=found has")
+	assert.NotContains(t, output.String(), "outcome=all has")
+
+	output.Reset()
+	sc.result.timings = sc.result.timings[:50]
+	warnThinSamples(logger, sc)
+	for _, label := range []string{"all has 50", "found has 40", "not_found has 10"} {
+		assert.Contains(t, output.String(), "latency outcome="+label+" samples")
+	}
+	assert.Equal(t, 3, strings.Count(output.String(), "fewer than"), "latency_from_due rows do not warn")
+}
+
+// A configured span that covers the whole dataset warns and lands in the run
+// settings; a span that fits inside it stays quiet.
+func TestWarnFixedReadRange(t *testing.T) {
+	ds := &queryDataset{FirstLedger: 10, LastLedger: 14}
+	for _, tc := range []struct {
+		name        string
+		ledgersSpan uint32
+		txPageSpan  uint32
+		want        string
+	}{
+		{"both spans cover the range", 5, 10, "ledgers and txpage"},
+		{"only txpage covers it", 2, 5, "txpage"},
+		{"both spans fit inside", 2, 3, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, output := capturingLogger()
+			p := queryPlan{
+				Types:       []string{queryTypeLedgers, queryTypeTxPage, queryTypeEvents},
+				LedgersSpan: tc.ledgersSpan,
+				TxPageSpan:  tc.txPageSpan,
+				Settings:    map[string]string{},
+			}
+			warnFixedReadRange(logger, ds, p)
+			if tc.want == "" {
+				assert.NotContains(t, output.String(), "fixed range")
+				assert.NotContains(t, p.Settings, "fixedReadRange")
+				return
+			}
+			assert.Contains(t, output.String(), "dataset holds 5 ledgers")
+			assert.Contains(t, output.String(), tc.want+" read the same fixed range")
+			assert.Equal(t, strings.ReplaceAll(tc.want, " and ", ","), p.Settings["fixedReadRange"])
+		})
+	}
+}
+
+// A query command whose --out holds a CSV fails before it rewrites run.json
+// or opens the dataset: the dataset paths do not exist, so reaching the run
+// body would fail with a different error.
+func TestQueryCommandsRefuseOutWithCSVs(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-dataset")
+	for _, args := range [][]string{
+		{queryTierCold, "--start-chunk", "0", "--cold-dir", missing},
+		{queryTierHot, "--chunk", "0", "--hot-dir", missing},
+	} {
+		t.Run(args[0], func(t *testing.T) {
+			requireRefusesStaleOut(t, NewQueryCommand(), args, "hot.csv", missing)
+		})
+	}
+}
+
+// runQueryCommand runs bench-query with args and --out, and returns the run
+// record and the scenarios.csv rows.
+func runQueryCommand(t *testing.T, args ...string) (runRecord, []map[string]string) {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "out")
+	cmd := NewQueryCommand()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(append(args, "--out", out))
+	require.NoError(t, cmd.Execute())
+
+	data, err := os.ReadFile(filepath.Join(out, runRecordFile))
+	require.NoError(t, err)
+	var record runRecord
+	require.NoError(t, json.Unmarshal(data, &record))
+	assert.Equal(t, runStatusOK, record.Status)
+	assert.Positive(t, record.SetupNs["storeOpen"])
+	assert.FileExists(t, filepath.Join(out, queryLatencyFile))
+	_, rows := readCSVTable(t, filepath.Join(out, queryScenariosFile))
+	return record, rows
+}
+
+// A hot run records the store open time and its cache settings, and evicts
+// nothing.
+func TestQueryHotCommandRecordsRun(t *testing.T) {
+	hotRoot := ingestHotChunk(t, 2*eventEvery)
+	record, rows := runQueryCommand(t, queryTierHot, "--chunk", "0", "--hot-dir", hotRoot,
+		"--types", queryTypeLedgers, "--target-rps", "1000", "--duration", "20ms")
+	assert.Equal(t, "warm-run", record.Settings["cacheScenario"])
+	assert.Equal(t, "off", record.Settings["pageCacheEviction"])
+	require.Len(t, rows, 1)
+	assert.Equal(t, queryTypeLedgers, rows[0]["query_type"])
+	assert.Equal(t, "20", rows[0]["planned"])
+	assert.Empty(t, rows[0]["page_cache_evict_ns"])
+}
+
+// A cold run evicts before each scenario on Linux and records the eviction
+// time; the store open time, cache settings and txhash pool size go into
+// run.json.
+func TestQueryColdCommandRecordsRun(t *testing.T) {
+	packDir, _ := writeSourcePack(t, t.TempDir(), 0, chunk.LedgersPerChunk)
+	coldRoot := t.TempDir()
+	require.NoError(t, runCold(context.Background(), testLogger(), coldOptions{
+		Source:     sourceConfig{Kind: sourcePack, PackDir: packDir},
+		StartChunk: 0,
+		NumChunks:  1,
+		Workers:    1,
+		ColdRoot:   coldRoot,
+		OutDir:     filepath.Join(t.TempDir(), "csv"),
+	}))
+	record, rows := runQueryCommand(t, queryTierCold, "--start-chunk", "0", "--cold-dir", coldRoot,
+		"--types", queryTypeLedgers+","+queryTypeTxHash, "--target-rps", "1000,2000", "--duration", "10ms")
+	assert.Equal(t, "cold-start", record.Settings["cacheScenario"])
+	assert.Equal(t, evictionState(true), record.Settings["pageCacheEviction"])
+	assert.NotEmpty(t, record.Settings["txhashPoolHashes"])
+	require.Len(t, rows, 4)
+	for _, row := range rows {
+		if evictSupported {
+			assert.NotEmpty(t, row["page_cache_evict_ns"], row["query_type"])
+		} else {
+			assert.Empty(t, row["page_cache_evict_ns"], row["query_type"])
+		}
+	}
+}
