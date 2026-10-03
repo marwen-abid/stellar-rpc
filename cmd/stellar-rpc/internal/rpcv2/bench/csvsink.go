@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,7 +18,7 @@ import (
 
 const csvHeader = "stage,n,n_items,total_ns,p50_ns,p90_ns,p99_ns,max_ns"
 
-// CSV file basenames not named after a data or query type.
+// CSV file basenames not named after a cold data type.
 const (
 	fileHot    = "hot"
 	fileDriver = "driver"
@@ -94,56 +93,6 @@ var fileSpecs = func() []fileSpec {
 	)
 }()
 
-// querySpecs is the bench-query report schema for one run over types and
-// rates. Types must be distinct and so must rates, or the schema repeats a row
-// name. The external results converter reads the query-type CSVs and
-// driver.csv. It recognizes only wall, _millirps, _lag and _shed as driver leg
-// rows and classifies every other driver row as setup. So the driver.csv row
-// set stays fixed, and completion accounting goes in query-accounting.csv.
-func querySpecs(types []string, rates []float64) []fileSpec {
-	specs := make([]fileSpec, 0, len(types)+2)
-	legSuffixes := []string{driverLegRPSSuffix, driverLegLagSuffix, driverLegShedSuffix}
-	accountingSuffixes := slices.Concat(
-		[]string{driverLegTargetRPSSuffix, driverLegCompletionRPSSuffix},
-		driverLegCountSuffixes,
-		[]string{driverLegArrivalSuffix, driverLegElapsedSuffix, driverLegDrainSuffix},
-	)
-	driverRows := make([]string, 0, len(types)*len(rates)*(len(legSuffixes)+1)+3)
-	accountingRows := make([]string, 0, len(types)*len(rates)*len(accountingSuffixes))
-	driverRows = append(driverRows, driverQueryOpen, driverQueryEvict)
-	for _, qtype := range types {
-		rows := make([]string, 0, len(rates)*2)
-		for _, rps := range rates {
-			rows = append(rows, queryTotalRow(rps))
-		}
-		for _, rps := range rates {
-			rows = append(rows, queryServiceRow(rps))
-		}
-		if qtype == queryTypeTxHash {
-			for _, stage := range []string{txHashStageFound, txHashStageMiss} {
-				for _, rps := range rates {
-					rows = append(rows, queryStageRow(stage, rps))
-				}
-			}
-		}
-		for _, rps := range rates {
-			driverRows = append(driverRows, queryDriverRow(qtype, rps))
-			for _, suffix := range legSuffixes {
-				driverRows = append(driverRows, queryDriverLegRow(qtype, rps, suffix))
-			}
-			for _, suffix := range accountingSuffixes {
-				accountingRows = append(accountingRows, queryDriverLegRow(qtype, rps, suffix))
-			}
-		}
-		specs = append(specs, fileSpec{name: qtype, rowOrder: rows})
-	}
-	driverRows = append(driverRows, driverPeakRSS)
-	return append(specs,
-		fileSpec{name: fileDriver, rowOrder: driverRows},
-		fileSpec{name: fileQueryAccounting, rowOrder: accountingRows},
-	)
-}
-
 // sample is one observed (duration, item-count) pair.
 type sample struct {
 	d     time.Duration
@@ -166,10 +115,11 @@ type rowKey struct {
 
 // csvSink is an ingest.MetricSink and an observability.Metrics. It keeps every
 // signal in memory as a raw sample and, on writeCSVs, aggregates each row into
-// percentiles laid out per specs. n counts the included samples and n_items
+// percentiles laid out per fileSpecs. n counts the included samples and n_items
 // sums their item counts. Zero-duration samples are dropped, so that empty
-// ledger stages do not skew percentiles, except in rows where keepsZeroSamples
-// holds. Rows with no included samples, and files with no rows, are suppressed.
+// ledger stages do not skew percentiles, except in pace_lag, where a zero is an
+// on-time ledger. Rows with no included samples, and files with no rows, are
+// suppressed.
 //
 // Of the observability signals, csvSink records Freeze, Rebuild and
 // LastCommitted and drops the rest. Prune fires from each index build's eager
@@ -178,8 +128,6 @@ type rowKey struct {
 // All methods are safe for concurrent use: the backfill scheduler runs several
 // chunk freezes against one sink.
 type csvSink struct {
-	specs []fileSpec // read-only after construction
-
 	mu       sync.Mutex
 	rows     map[rowKey]*series
 	hotBurst time.Duration // the current hot ledger's phase sum (see HotPhase)
@@ -198,14 +146,9 @@ var (
 	_ observability.Metrics = (*csvSink)(nil)
 )
 
-// newCSVSink returns an empty recorder with the bench-ingest schema.
+// newCSVSink returns an empty recorder.
 func newCSVSink() *csvSink {
-	return newSchemaCSVSink(fileSpecs)
-}
-
-// newSchemaCSVSink returns an empty recorder with schema specs.
-func newSchemaCSVSink(specs []fileSpec) *csvSink {
-	return &csvSink{rows: make(map[rowKey]*series), specs: specs}
+	return &csvSink{rows: make(map[rowKey]*series)}
 }
 
 // HotPhase records one hot ingest phase into hot.csv. It also sums each
@@ -348,7 +291,7 @@ type row struct {
 }
 
 // aggregate reduces a series to a row. Zero-duration samples are dropped unless
-// includeZeros (see keepsZeroSamples). ok is false when no sample survives.
+// includeZeros. ok is false when no sample survives.
 func aggregate(name string, s *series, includeZeros bool) (row, bool) {
 	durs := make([]time.Duration, 0, len(s.samples))
 	items := 0
@@ -395,48 +338,14 @@ func withUnknown[V any](order []string, m map[string]V) []string {
 	return append(slices.Clone(order), extra...)
 }
 
-// keepsZeroSamples reports whether a row keeps its zero-duration samples,
-// because zero is a real observation there: the lag (including pace_lag),
-// drain, rate and count rows of driver.csv and query-accounting.csv.
-func keepsZeroSamples(file, label string) bool {
-	if file != fileDriver && file != fileQueryAccounting {
-		return false
-	}
-	_, isCount := legCountName(label)
-	return isCount ||
-		strings.HasSuffix(label, driverLegLagSuffix) ||
-		strings.HasSuffix(label, driverLegDrainSuffix) ||
-		strings.HasSuffix(label, driverLegRPSSuffix)
-}
-
-// driverLegCountSuffixes are the leg rows that store a request count in
-// n_items, with duration zero.
-//
-//nolint:gochecknoglobals // fixed report vocabulary, read-only
-var driverLegCountSuffixes = []string{
-	driverLegScheduledSuffix, driverLegDispatchedSuffix, driverLegSuccessSuffix,
-	driverLegFailedSuffix, driverLegShedSuffix,
-}
-
-// legCountName returns the count that a count row stores, such as "shed" for a
-// _shed row. ok is false for any other row.
-func legCountName(label string) (string, bool) {
-	for _, suffix := range driverLegCountSuffixes {
-		if strings.HasSuffix(label, suffix) {
-			return strings.TrimPrefix(suffix, "_"), true
-		}
-	}
-	return "", false
-}
-
 // file is one aggregated CSV file: its basename (without .csv) and its rows.
 type file struct {
 	name string
 	rows []row
 }
 
-// files aggregates every recorded series into the report's CSV files, in the
-// sink's schema order (a file outside the schema is appended after, sorted, its
+// files aggregates every recorded series into the report's CSV files, in
+// fileSpecs order (a file outside the schema is appended after, sorted, its
 // rows ordered by sorted label).
 func (s *csvSink) files() []file {
 	s.mu.Lock()
@@ -450,9 +359,9 @@ func (s *csvSink) files() []file {
 		byFile[k.file][k.row] = sr
 	}
 
-	names := make([]string, len(s.specs))
-	rowOrders := make(map[string][]string, len(s.specs))
-	for i, spec := range s.specs {
+	names := make([]string, len(fileSpecs))
+	rowOrders := make(map[string][]string, len(fileSpecs))
+	for i, spec := range fileSpecs {
 		names[i] = spec.name
 		rowOrders[spec.name] = spec.rowOrder
 	}
@@ -463,7 +372,7 @@ func (s *csvSink) files() []file {
 		var rows []row
 		for _, label := range withUnknown(rowOrders[name], byRow) {
 			if sr := byRow[label]; sr != nil {
-				if r, ok := aggregate(label, sr, keepsZeroSamples(name, label)); ok {
+				if r, ok := aggregate(label, sr, label == driverPaceLag); ok {
 					rows = append(rows, r)
 				}
 			}
@@ -516,44 +425,22 @@ func writeCSV(path string, rows []row) error {
 	return nil
 }
 
-// logSummary logs one line per aggregated row.
+// logSummary logs one line per aggregated row. peak_rss_bytes prints as a
+// byte count.
 func (s *csvSink) logSummary(logger *supportlog.Entry) {
 	for _, f := range s.files() {
 		for _, r := range f.rows {
-			logRow(logger, f.name, r)
+			if f.name == fileDriver && r.name == driverPeakRSS {
+				logger.Infof("%-10s %-12s n=%-7d bytes=%d", f.name, r.name, r.n, r.total.Nanoseconds())
+				continue
+			}
+			logger.Infof("%-10s %-12s n=%-7d items=%-9d total=%-12s p50=%-10s p90=%-10s p99=%-10s max=%s",
+				f.name, r.name, r.n, r.items,
+				r.total.Round(time.Microsecond),
+				r.p50.Round(time.Microsecond),
+				r.p90.Round(time.Microsecond),
+				r.p99.Round(time.Microsecond),
+				r.maxv.Round(time.Microsecond))
 		}
 	}
-}
-
-// logRow logs one aggregated row. The rate and count rows of driver.csv and
-// query-accounting.csv, and driver.csv's peak_rss_bytes, print in their own
-// units.
-func logRow(logger *supportlog.Entry, fileName string, r row) {
-	if fileName == fileDriver || fileName == fileQueryAccounting {
-		count, isCount := legCountName(r.name)
-		switch {
-		case fileName == fileDriver && r.name == driverPeakRSS:
-			logger.Infof("%-10s %-12s n=%-7d bytes=%d", fileName, r.name, r.n, r.total.Nanoseconds())
-			return
-		case strings.HasSuffix(r.name, driverLegTargetRPSSuffix),
-			strings.HasSuffix(r.name, driverLegCompletionRPSSuffix):
-			logger.Infof("%-10s %-12s n=%-7d rps=%.3f", fileName, r.name, r.n,
-				float64(r.total.Nanoseconds())/milliPerUnit)
-			return
-		case strings.HasSuffix(r.name, driverLegRPSSuffix):
-			logger.Infof("%-10s %-12s n=%-7d window_rps=%.3f", fileName, r.name, r.n,
-				float64(r.total.Nanoseconds())/milliPerUnit)
-			return
-		case isCount:
-			logger.Infof("%-10s %-12s n=%-7d %s=%d", fileName, r.name, r.n, count, r.items)
-			return
-		}
-	}
-	logger.Infof("%-10s %-12s n=%-7d items=%-9d total=%-12s p50=%-10s p90=%-10s p99=%-10s max=%s",
-		fileName, r.name, r.n, r.items,
-		r.total.Round(time.Microsecond),
-		r.p50.Round(time.Microsecond),
-		r.p90.Round(time.Microsecond),
-		r.p99.Round(time.Microsecond),
-		r.maxv.Round(time.Microsecond))
 }

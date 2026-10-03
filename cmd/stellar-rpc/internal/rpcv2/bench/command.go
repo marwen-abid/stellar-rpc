@@ -2,7 +2,9 @@ package bench
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
 	"strings"
@@ -112,22 +114,19 @@ type flagBinder interface {
 	bind(cmd *cobra.Command)
 }
 
-// runEnv is what newBenchCommand hands a run. Entries the run adds to Extra
-// land in invocation.json.
+// runEnv is what newBenchCommand hands a run. What the run puts in Settings
+// and SetupTimes goes into run.json.
 type runEnv struct {
-	OutDir string
-	// Extra is written by the run goroutine only and read once run returns.
-	Extra map[string]string
+	OutDir     string
+	Settings   map[string]string
+	SetupTimes map[string]time.Duration
 }
 
-// newBenchCommand builds one bench subcommand: no positional args,
-// SIGINT-canceled context, Info-level logger, profiling around run, --out and
-// groups bound, invocation.json written to --out at start and at end. A
-// non-nil preflight vets --out first; its error ends the command with --out
-// left unchanged.
+// newBenchCommand builds one bench subcommand with --out, prof and groups
+// bound. It refuses an --out that holds a CSV, writes run.json before and
+// after run, and cancels run on SIGINT or SIGTERM.
 func newBenchCommand(
 	use, short string, prof *profileFlags,
-	preflight func(outDir string) error,
 	run func(ctx context.Context, logger *supportlog.Entry, env runEnv) error,
 	groups ...flagBinder,
 ) *cobra.Command {
@@ -141,36 +140,35 @@ func newBenchCommand(
 			ctx, stop, logger := benchContext()
 			defer stop()
 			startedAt := time.Now().UTC()
-			env := runEnv{OutDir: outDir, Extra: map[string]string{}}
-			// A failed first write ends the command before the run starts. A
-			// failed last write is only logged when the run failed, so the
-			// run's own error surfaces.
+			env := runEnv{
+				OutDir:     outDir,
+				Settings:   map[string]string{},
+				SetupTimes: map[string]time.Duration{},
+			}
+			if err := refuseStaleCSVs(outDir); err != nil {
+				return err
+			}
 			if err := os.MkdirAll(outDir, 0o755); err != nil {
 				return fmt.Errorf("create --out dir %s: %w", outDir, err)
 			}
-			if preflight != nil {
-				if err := preflight(outDir); err != nil {
-					return err
-				}
-			}
-			flags := captureFlags(cmd)
-			if err := writeInvocationJSON(outDir, cmd, flags, env.Extra, startedAt, time.Time{}, nil); err != nil {
+			record := newRunRecord(cmd, captureFlags(cmd), startedAt)
+			if err := writeRunRecord(outDir, record); err != nil {
 				return err
 			}
 			runErr := prof.around(logger, func() error { return run(ctx, logger, env) })
-			if err := writeInvocationJSON(
-				outDir, cmd, flags, env.Extra, startedAt, time.Now().UTC(), runErr,
-			); err != nil {
+			peakRSS, _ := readPeakRSS() // zero, so absent from run.json, without /proc
+			record.finish(time.Now().UTC(), env, peakRSS, runErr)
+			if err := writeRunRecord(outDir, record); err != nil {
 				if runErr == nil {
 					return err
 				}
-				logger.Warnf("writing invocation.json: %v", err)
+				logger.Warnf("writing %s: %v", runRecordFile, err)
 			}
 			return runErr
 		},
 	}
 	cmd.Flags().StringVar(&outDir, "out", "bench-out",
-		"output dir for the CSV report and invocation.json; must not hold a .csv file")
+		"output dir for the CSV report and run.json; must not hold a .csv file")
 	prof.bind(cmd)
 	for _, g := range groups {
 		g.bind(cmd)
@@ -178,11 +176,13 @@ func newBenchCommand(
 	return cmd
 }
 
-// refuseStaleCSVs fails when outDir already holds a CSV. The results converter
-// reads every CSV in --out as part of the report, so an earlier run's CSVs
-// would read as this run's results.
+// refuseStaleCSVs fails when outDir holds a CSV, so that one report never
+// mixes two runs. A missing outDir passes.
 func refuseStaleCSVs(outDir string) error {
 	entries, err := os.ReadDir(outDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("read --out dir %s: %w", outDir, err)
 	}
@@ -207,7 +207,7 @@ func newColdCommand() *cobra.Command {
 	)
 	cmd := newBenchCommand("cold",
 		"Benchmark cold ingestion: the daemon's backfill (chunk freezes + txhash index builds) over a chunk range",
-		&prof, refuseStaleCSVs,
+		&prof,
 		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			return runCold(ctx, logger, coldOptions{
 				Source:     src.config(),
@@ -245,7 +245,7 @@ func newHotCommand() *cobra.Command {
 	)
 	cmd := newBenchCommand("hot",
 		"Benchmark hot ingestion: the daemon's live ingestion loop over a chunk range",
-		&prof, refuseStaleCSVs,
+		&prof,
 		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			return runHot(ctx, logger, hotOptions{
 				Source:        src.config(),
