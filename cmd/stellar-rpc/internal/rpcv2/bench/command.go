@@ -156,7 +156,7 @@ func newBenchCommand(
 				Settings:   map[string]string{},
 				SetupTimes: map[string]time.Duration{},
 			}
-			if err := requireEmptyOut(outDir); err != nil {
+			if err := requireEmptyDir("out", outDir); err != nil {
 				return err
 			}
 			if err := os.MkdirAll(outDir, dirPerm); err != nil {
@@ -189,19 +189,19 @@ func newBenchCommand(
 	return cmd
 }
 
-// requireEmptyOut fails unless outDir is missing or empty, so a run never
-// replaces the files of an earlier run.
-func requireEmptyOut(outDir string) error {
-	entries, err := os.ReadDir(outDir)
+// requireEmptyDir fails unless dir, the value of --flag, is missing or empty,
+// so a run never writes over the files of an earlier run.
+func requireEmptyDir(flag, dir string) error {
+	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("read --out dir %s: %w", outDir, err)
+		return fmt.Errorf("read --%s dir %s: %w", flag, dir, err)
 	}
 	if len(entries) > 0 {
-		return fmt.Errorf("--out dir %s is not empty (it holds %s); pass a missing or empty --out dir",
-			outDir, entries[0].Name())
+		return fmt.Errorf("--%s dir %s is not empty (it holds %s); pass a missing or empty --%s dir",
+			flag, dir, entries[0].Name(), flag)
 	}
 	return nil
 }
@@ -231,7 +231,6 @@ func newColdCommand() *cobra.Command {
 		func(ctx context.Context, logger *supportlog.Entry, env runEnv) error {
 			o := opts()
 			o.OutDir = env.OutDir
-			o.Settings = env.Settings
 			return runCold(ctx, logger, o)
 		})
 	src.bind(cmd)
@@ -240,8 +239,7 @@ func newColdCommand() *cobra.Command {
 	fs.IntVar(&numChunks, "num-chunks", 1, "how many consecutive chunks to backfill starting at --start-chunk")
 	fs.IntVar(&workers, "workers", 1, "backfill worker-pool size, shared by chunk freezes and index builds")
 	fs.StringVar(&coldOutDir, "cold-out-dir", "",
-		"dataset root for the catalog and the cold artifacts (required); a run into an existing "+
-			"dataset must start at the chunk after its last one")
+		"dataset root for the catalog and the cold artifacts (required); must be missing or empty")
 	markRequired(cmd, "start-chunk", "cold-out-dir")
 	return cmd
 }
@@ -282,8 +280,7 @@ func newHotCommand() *cobra.Command {
 		"how many consecutive chunks to ingest starting at --start-chunk (>1 exercises the hot DB rotation)")
 	fs.Uint32Var(&numLedgers, "num-ledgers", 0, "cap on ledgers ingested from the range's start (0 = whole range)")
 	fs.StringVar(&hotDir, "hot-dir", "",
-		"dataset root for the catalog and the hot chunk databases (required); a run into an existing "+
-			"dataset must start at the chunk after its last one")
+		"dataset root for the catalog and the hot chunk databases (required); must be missing or empty")
 	fs.DurationVar(&closeInterval, "close-interval", 0,
 		"assumed time between ledger closes; >0 paces ingestion to that steady-state cadence "+
 			"and reports pace_lag (0 = ingest back-to-back, catch-up throughput)")

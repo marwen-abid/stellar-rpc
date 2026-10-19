@@ -213,11 +213,10 @@ func run(ctx context.Context, cfg StartConfig) error {
 	return g.Wait()
 }
 
-// OpenServing opens the read registry over cat's committed state the way
-// daemon startup does: it opens or creates the hot DB of the chunk after
-// lastCommitted, opens the registry with that DB as the live chunk, and stamps
-// both window edges' close times. On success the caller must close the
-// registry, which also closes the returned DB; on error nothing stays open.
+// OpenServing opens a read registry over catalog's committed state and a hot DB
+// for ledger lastCommitted+1, with close times for both serving-window edges.
+// The caller must close the registry, which also closes the returned DB.
+// On error, it closes any resources it opened.
 func OpenServing(
 	cat *catalog.Catalog, retention geometry.Retention, lastCommitted uint32, logger *supportlog.Entry,
 ) (*query.Registry, *hotchunk.DB, error) {

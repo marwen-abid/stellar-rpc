@@ -52,6 +52,14 @@ func TestCommandRecordsFailedRun(t *testing.T) {
 	}
 }
 
+// nonEmptyDir returns a new directory that holds one file.
+func nonEmptyDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "leftover"), nil, 0o600))
+	return dir
+}
+
 // TestCommandRejectsBadFlagsBeforeOut checks that a flag error creates no --out.
 func TestCommandRejectsBadFlagsBeforeOut(t *testing.T) {
 	for _, tc := range []struct {
@@ -68,6 +76,12 @@ func TestCommandRejectsBadFlagsBeforeOut(t *testing.T) {
 			"--hot-dir", t.TempDir(),
 		}, "--source=bogus"},
 		{"hot missing required flags", []string{"hot"}, `required flag(s) "hot-dir", "start-chunk" not set`},
+		{"cold non-empty dataset dir", []string{
+			"cold", "--start-chunk", "0", "--cold-out-dir", nonEmptyDir(t), "--pack-dir", t.TempDir(),
+		}, "--cold-out-dir dir"},
+		{"hot non-empty dataset dir", []string{
+			"hot", "--start-chunk", "0", "--hot-dir", nonEmptyDir(t), "--pack-dir", t.TempDir(),
+		}, "--hot-dir dir"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			outDir := filepath.Join(t.TempDir(), "csv")
@@ -124,8 +138,8 @@ func TestCommandRecordsSuccessfulRun(t *testing.T) {
 	assert.NotContains(t, raw, "error")
 }
 
-// TestRequireEmptyOut checks which --out dirs requireEmptyOut accepts.
-func TestRequireEmptyOut(t *testing.T) {
+// TestRequireEmptyDir checks which dirs requireEmptyDir accepts.
+func TestRequireEmptyDir(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		files []string
@@ -149,7 +163,7 @@ func TestRequireEmptyOut(t *testing.T) {
 			for _, name := range tc.dirs {
 				require.NoError(t, os.Mkdir(filepath.Join(out, name), 0o700))
 			}
-			err := requireEmptyOut(out)
+			err := requireEmptyDir("out", out)
 			if tc.held == "" {
 				require.NoError(t, err)
 				return
@@ -162,7 +176,7 @@ func TestRequireEmptyOut(t *testing.T) {
 	t.Run("out is a file", func(t *testing.T) {
 		out := filepath.Join(t.TempDir(), "out")
 		require.NoError(t, os.WriteFile(out, nil, 0o600))
-		require.ErrorContains(t, requireEmptyOut(out), "read --out dir")
+		require.ErrorContains(t, requireEmptyDir("out", out), "read --out dir")
 	})
 }
 

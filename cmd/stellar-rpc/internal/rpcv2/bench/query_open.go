@@ -22,7 +22,7 @@ import (
 func newQueryCommand() *cobra.Command {
 	var (
 		qf   queryFlags
-		prof profileFlags
+		prof = profileFlags{cpuPerScenario: true}
 		cmd  *cobra.Command
 
 		dataDir       string
@@ -40,6 +40,7 @@ func newQueryCommand() *cobra.Command {
 			HasStartChunk: cmd.Flags().Changed("start-chunk"),
 			SampleLedgers: sampleLedgers,
 			Plan:          plan,
+			CPUProfile:    prof.cpuProfile,
 		}, nil
 	}
 	cmd = newBenchCommand("query",
@@ -89,6 +90,9 @@ type queryOptions struct {
 
 	// Plan is the validated flags.
 	Plan queryPlan
+
+	// CPUProfile is the --cpuprofile path; see runQueryBench.
+	CPUProfile string
 }
 
 // validate checks the flags, and that --data-dir holds a catalog.
@@ -115,7 +119,7 @@ func runQuery(ctx context.Context, logger *supportlog.Entry, env runEnv, opts qu
 	if err := opts.validate(); err != nil {
 		return err
 	}
-	return runQueryBench(ctx, logger, env, opts.Plan, func() (*queryDataset, func(), error) {
+	return runQueryBench(ctx, logger, env, opts.Plan, opts.CPUProfile, func() (*queryDataset, func(), error) {
 		return openDataset(logger, opts)
 	})
 }

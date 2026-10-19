@@ -130,8 +130,7 @@ func TestOpenDatasetBounds(t *testing.T) {
 	assert.Equal(t, chunk.ID(1).FirstLedger()+4, ds.LastLedger)
 
 	var latest protocol.GetLatestLedgerResponse
-	_, err = ds.server.call(context.Background(), protocol.GetLatestLedgerMethodName, nil, &latest)
-	require.NoError(t, err)
+	callResult(t, ds.server, protocol.GetLatestLedgerMethodName, nil, &latest)
 	assert.Equal(t, ds.LastLedger, latest.Sequence)
 
 	_, err = requestItems(ds, plan, ledgersRequest, chunk.ID(0).LastLedger(), chunk.ID(0).LastLedger())
@@ -144,7 +143,8 @@ func TestOpenDatasetBounds(t *testing.T) {
 func TestOpenDatasetRequiresLiveChunk(t *testing.T) {
 	coldRoot := ingestColdChunk(t)
 	cat := reopenCatalog(t, coldRoot)
-	require.NoError(t, discardLiveChunk(cat, 1))
+	require.NoError(t, cat.PutHotTransient(1))
+	require.NoError(t, cat.DestroyHotChunk(1))
 	require.NoError(t, cat.Close())
 	hotRoot := geometry.NewLayout(coldRoot).HotRoot()
 	before := dirNames(t, hotRoot)
